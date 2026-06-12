@@ -8,7 +8,7 @@
 \titlebackground{assets/background}
 
 \title{OPD Interpretability and Better Recipe}
-\subtitle{关于On-Policy一些分析性工作的分享}
+\subtitle{关于 On-Policy Distillation 三篇分析性工作的分享}
 \author{林佳豪}
 \date{2026.6.12}
 
@@ -46,7 +46,6 @@
 \begin{frame}[t]{\underline{现象1.1：} 初始匹配度 (实验设置)}
   \begin{columns}[T,onlytextwidth]
     \begin{column}{0.48\textwidth}
-      \small
       \textbf{实验设置}：
       \begin{itemize}
         \item \textbf{学生模型}：Qwen3-1.7B-Base
@@ -653,12 +652,245 @@
   \end{columns}
 \end{frame}
 
+\section{The Many Faces of On-Policy Distillation}
+
+% Slide 1: 框架介绍
+\begin{frame}[t]{\underline{框架介绍}：OPD 与 OPSD}
+  \textbf{两种范式}：
+  \begin{itemize}
+    \item \textbf{OPD}：外部教师 $\pi_T$ 在学生轨迹上提供 token 级监督
+    \item \textbf{OPSD}：学生自蒸馏，教师通过\textbf{特权信息 (PI)} 条件化
+  \end{itemize}
+
+  \vspace{0.1cm}
+  \textbf{OPSD 的核心思想}：给学生"开卷"——注入特权信息（如标准答案、系统提示）——作为教师，期望其在条件化后输出更高质量的监督。
+
+  \vspace{0.2cm}
+  \textbf{PI 的两种结构}：
+  \begin{itemize}
+    \item \textbf{Instance-specific PI}：数学答案、完整推理链
+    \item \textbf{Shared-latent PI}：系统提示、角色设定、对齐偏好
+  \end{itemize}
+
+  \vspace{0.1cm}
+  \textbf{OPSD 什么时候有效，什么时候失败？}
+\end{frame}
+
+% Slide 2: 观察1 — 数学推理失败
+\begin{frame}[t]{\underline{实验1：} OPSD 在数学推理上崩溃}
+  \textbf{实验设置}：Qwen3-1.7B 自蒸馏，教师注入数学答案作为 PI，在 OpenThoughts 上训练。
+
+  \vspace{0.1cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=3.5cm,keepaspectratio]{references/The Many Faces of On-Policy Distillation Pitfalls, Mechanisms, and Fixes/figures/top20_eval_math500_1.pdf}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=3.5cm,keepaspectratio]{references/The Many Faces of On-Policy Distillation Pitfalls, Mechanisms, and Fixes/figures/rollout_metrics_dual_axis.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.1cm}
+  \textbf{实验结果}：训练约 700--1000 步后，准确率崩溃至接近零，响应长度爆炸，"maybe" 等重复 token 主导输出。无论 PI 是答案还是完整响应，均无法避免崩溃。
+\end{frame}
+
+% Slide 3: 观察2 — 风格对齐成功
+\begin{frame}[t]{\underline{实验2：} OPSD 在风格对齐上成功}
+  \textbf{实验设置}：同一框架用于 CharacterBench（角色扮演）和 EmotionBench（情感对齐）。
+
+  \vspace{0.1cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4cm,keepaspectratio]{references/The Many Faces of On-Policy Distillation Pitfalls, Mechanisms, and Fixes/figures/qwen3-4B_characterbench.pdf}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4cm,keepaspectratio]{references/The Many Faces of On-Policy Distillation Pitfalls, Mechanisms, and Fixes/figures/qwen3-4B_emotionbench.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.1cm}
+  \textbf{实验结果}：OPSD 收敛速度优于 GRPO 和 PPO，稳定提升。\par
+  为什么同样的框架，数学崩溃但对齐成功？$\to$ 关键在于 PI 结构。
+\end{frame}
+
+% Slide 4: 分析1 — 前缀漂移
+\begin{frame}[t]{\underline{分析1：} 前缀漂移导致教师退化}
+  \textbf{问题}：教师在学生轨迹上给出的监督可靠吗？
+
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4cm,keepaspectratio]{references/The Many Faces of On-Policy Distillation Pitfalls, Mechanisms, and Fixes/figures/prefix_conditioning_gpqa_clean.pdf}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{GPQA-Diamond 实验}：
+      \begin{itemize}
+        \item 独立 Qwen3-14B 教师：\textbf{62.1\%}
+        \item 接续 1.7B 学生前缀后：\textbf{46.0\%}
+        \item 绝对下降 \textbf{16.16 pp}
+      \end{itemize}
+      \vspace{0.1cm}
+      40 个原本正确的预测变为错误，仅 8 个错误变正确。
+    \end{column}
+  \end{columns}
+
+  \vspace{0.1cm}
+  \textbf{结论}：学生前缀严重扭曲教师的推理状态，教师在偏离轨迹上的局部评估远不如独立推理可靠。
+\end{frame}
+
+% Slide 5: 分析2 — TopK 梯度偏差（推导）
+\begin{frame}[t]{\underline{分析2.1：} TopK 反向 KL 的梯度偏差（理论）}
+  \small
+  \textbf{全词表反向 KL}：$\mathcal{L} = \sum_v q(v) \log \frac{q(v)}{p_\theta(v)}$，对 $\theta$ 求梯度：
+
+  \[
+    \nabla_\theta \mathcal{L} = \underbrace{-\sum_v q(v) \nabla_\theta \log p_\theta(v)}_{\text{主项}} + \underbrace{\left(\sum_v q(v)\right) \cdot \nabla_\theta \log \sum_v p_\theta(v)}_{= 1 \cdot \nabla_\theta \log 1 = 0}
+  \]
+  常数项因\textbf{全词表归一化}（$\sum_v p_\theta(v) = 1$）精确抵消。
+
+  \vspace{0.1cm}
+  \textbf{TopK 截断后}：求和仅在 $S = \mathrm{TopK}_q$ 上，$\sum_{v \in S} p_\theta(v) < 1$，归一化恒等式\textbf{不再成立}：
+  \[
+    \nabla_\theta \mathcal{L}_{\mathrm{TopK}} \approx -\sum_{v \in S} q(v) \nabla_\theta \log p_\theta(v) + \color{red}{\sum_{v \in S} q(v) \cdot \nabla_\theta \log \sum_{v \in S} p_\theta(v)}
+  \]
+  \textcolor{red}{红色项}即为偏差来源：一个 token 要获得正向提升，需满足 $p_\theta(v) > e \cdot q(v)$（$e \approx 2.718$），\textbf{抑制了教师偏好的小 margin token}。
+\end{frame}
+
+% Slide 5b: 分析2 — TopK 梯度偏差（实验）
+\begin{frame}[t]{\underline{分析2.2：} TopK 反向 KL 的梯度偏差（实验）}
+  \textbf{实验设置}：学生 Qwen3-1.7B，教师 Qwen3-8B，在 OpenThoughts 上训练，Math500 评测。固定 $K{=}5$，对比四种反向 KL 实现。
+
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.45\textwidth}
+      \small
+      \begin{itemize}
+        \item \textbf{Full KL}：完整词表，无截断
+        \item \textbf{Unnormalized TopK}：截断后不重归一化
+        \item \textbf{Renormalized TopK}：截断后师生分布各自归一化
+        \item \textbf{Stopgrad TopK}：对 student log-prob 停止梯度
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4cm,keepaspectratio]{references/The Many Faces of On-Policy Distillation Pitfalls, Mechanisms, and Fixes/figures/top5_eval_math500.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.05cm}
+  \textbf{结果}：Unnormalized TopK 训练崩溃；其余三种均稳定。根因不是 $K$ 的大小，而是截断本身破坏了归一化恒等式。
+\end{frame}
+
+% Slide 6: 分析3 — OPSD 聚合退化
+\begin{frame}[t]{\underline{分析3：} 实例特化 PI 的失败机制}
+  \textbf{理论解释}：OPSD 的最优学生 $\approx$ 所有 PI 条件教师分布的\textbf{归一化几何平均}。
+
+  \textbf{例}：两道数学题答案分别为 $A$ 和 $B$，教师条件化 $A$ 时偏向解 $A$ 的路径，条件化 $B$ 时偏向解 $B$ 的路径——互相矛盾。几何平均后 $A$-特定和 $B$-特定行为\textbf{互相抵消}，学生学到比任何单一 PI 教师都弱的聚合。而共享潜规则 PI（如角色设定）在所有样本上方向一致，几何平均反而提取共性、增强泛化。
+
+  \vspace{0.2cm}
+  \centering
+  \includegraphics[width=0.82\linewidth,height=4cm,keepaspectratio]{references/The Many Faces of On-Policy Distillation Pitfalls, Mechanisms, and Fixes/figures/OPSD_diffPI.pdf}
+\end{frame}
+
+% Slide 7: 方法1 — 三种修复 TopK 偏差的方案
+\begin{frame}[t]{\underline{方法1：} 三种修复 TopK 偏差的方案}
+  针对 TopK 截断导致的 "+1" 偏差，有三种等价的修复思路：
+
+  \vspace{0.1cm}
+  \textbf{1. Stop-gradient}：计算损失时把学生当前概率\textbf{当作固定权重}，不参与梯度回传。梯度只由教师信号驱动，不再依赖归一化恒等式。
+
+  \textbf{2. Renormalized TopK}：在 TopK 子集内对师生分布\textbf{各自重新归一化}，使 $\sum_{v \in S} p_\theta(v) = 1$ 恢复成立，"+1" 项再次抵消。
+
+  \textbf{3. Policy-gradient}：将采样 token 的 log-probability 差作为优势信号，直接用 REINFORCE 风格更新。
+
+  \vspace{0.1cm}
+  三者在实验中效果等价，均稳定收敛（见分析2实验）。
+\end{frame}
+
+% Slide 8: Fix 2 — RLVR 教师
+\begin{frame}[t]{\underline{方法2：} 教师 RLVR 适配}
+  \textbf{发现}：教师 benchmark 准确率不能预测 OPD 效果。
+
+  \vspace{0.1cm}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \textbf{实验}：
+      \begin{itemize}
+        \item Qwen3-1.7B-GRPO（DAPO 训练 200 步）$\approx$ Qwen3-8B 的 benchmark 性能
+        \item 但从 GRPO 教师蒸馏\textbf{显著优于}从 8B 教师蒸馏
+      \end{itemize}
+      \vspace{0.1cm}
+      \textbf{原因}：RLVR 教师的 Top-20 词表分布与学生更对齐。
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4.5cm,keepaspectratio]{references/The Many Faces of On-Policy Distillation Pitfalls, Mechanisms, and Fixes/figures/top20_eval_math500_1.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.1cm}
+  \textbf{启示}：蒸馏前先用 RL 在目标分布上训练教师，比单纯增大教师规模更有效。
+\end{frame}
+
+% Slide 9: 方法3 — SFT 冷启动
+\begin{frame}[t]{\underline{方法3：} SFT 冷启动}
+  \textbf{问题}：Base 模型直接 OPD 时，学生产生乱码、非英语 Unicode 等退化输出。\par
+  \textbf{解决}：先用教师 trace 做 SFT 冷启动，稳定输出空间（NLL 0.640 $\to$ 0.335，PPL 1.896 $\to$ 1.397），再做 OPD。
+
+  \vspace{0.1cm}
+  \centering
+  \includegraphics[width=0.95\linewidth,height=4.5cm,keepaspectratio]{references/The Many Faces of On-Policy Distillation Pitfalls, Mechanisms, and Fixes/figures/sft_opd_4b_teacher_combined.pdf}
+\end{frame}
+
+% Slide 10: 总结
+\begin{frame}[t]{总结}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \textbf{三个失败机制}
+      \begin{itemize}
+        \item \textbf{前缀漂移}：学生前缀扭曲教师状态，GPQA 准确率下降 16pp
+        \item \textbf{TopK 梯度偏差}：未归一化截断导致"+1"项无法抵消，训练崩溃
+        \item \textbf{OPSD 聚合退化}：Instance-specific PI 的几何平均弱于单一教师
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{三个方法}
+      \begin{itemize}
+        \item \textbf{Stop-gradient TopK}：消除梯度偏差，稳定训练
+        \item \textbf{RLVR 适配教师}：分布对齐优于规模扩大
+        \item \textbf{SFT 冷启动}：稳定输出空间，使 OPD 有效
+      \end{itemize}
+      \vspace{0.1cm}
+      \textbf{核心结论}：OPD/OPSD 的效果\textbf{高度依赖任务和 PI 结构}，不存在一刀切方案。
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\section{Conclusion}
+
+\begin{frame}[t]{三篇同期工作的共同发现}
+  \textbf{1. SFT 冷启动是 OPD 成功的前提}——Paper 1 和 Paper 3 独立发现：先用教师 trace SFT 稳定学生输出空间，再做 OPD，效果显著提升。
+
+  \textbf{2. 教师质量 $\neq$ Benchmark 分数}——Paper 1 发现 RL 后新输出模式比更大教师更有效；Paper 3 发现 RLVR 适配教师优于更大的外部教师。\textbf{分布对齐比规模更重要。}
+
+  \textbf{3. TopK 截断需要特殊处理}——Paper 2（LSM 支持集重归一化）和 Paper 3（Stop-gradient / Renormalized TopK）独立得出相同结论：未归一化的 TopK 反向 KL 会导致训练崩溃。
+
+  \textbf{4. 师生分布对齐是核心}——Paper 1 用 Overlap Ratio 追踪对齐动力学；Paper 2 在 top-$K$ 支持域内做分布匹配；Paper 3 证明分布对齐比模型规模更重要。
+
+  \vspace{0.3cm}
+  \textbf{共同结论}：OPD 的成功不在于教师多大或多准，而在于\textbf{稳定的初始化对齐}以及\textbf{对TopK截断偏差的正确处理}。
+\end{frame}
+
 \section{References}
 \begin{frame}[allowframebreaks]{参考文献}
   \footnotesize
   \begin{thebibliography}{9}
     \bibitem{rethinking} Yaxuan Li, Yuxin Zuo, Bingxiang He, Jinqian Zhang, Chaojun Xiao, Cheng Qian, Tianyu Yu, Huan-ang Gao, Wenkai Yang, Zhiyuan Liu, Ning Ding. \textit{Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe}. arXiv:2604.13016, 2026.
     \bibitem{revisiting} Yuqian Fu, Haohuan Huang, Kaiwen Jiang, Jiacai Liu, Zhuo Jiang, Yuanheng Zhu, Dongbin Zhao. \textit{Revisiting On-Policy Distillation: Empirical Failure Modes and Simple Fixes}. arXiv:2603.25562, 2026.
+    \bibitem{manyfaces} Siqi Zhu, Xuyan Ye, Hongyu Lu, Weiye Shi, Ge Liu. \textit{The Many Faces of On-Policy Distillation: Pitfalls, Mechanisms, and Fixes}. arXiv:2605.11182, 2026.
   \end{thebibliography}
 \end{frame}
 
