@@ -1,0 +1,401 @@
+\documentclass{beamer}
+\usetheme{zgca}
+\usepackage{tikz}
+\usepackage{wrapfig}
+
+% Set the background image for the title slide
+\titlebackground{assets/background}
+
+\title{OPD Interpretability and Better Recipe}
+\subtitle{Rethinking On-Policy Distillation of Large Language Models}
+\author{林佳豪}
+\date{2026.6.12}
+
+\begin{document}
+
+% Slide 1: Cover Page (Using standard template maketitle)
+\maketitle
+
+% Define Section with Paper Title
+\section{Rethinking On-Policy Distillation of Large Language Models}
+
+% Slide 2: 本文观察的对齐指标
+\begin{frame}[t]{本文观察的对齐指标}
+  \small
+  设学生 top-$k$ 集合为 $S_t^{(p)}$，教师为 $S_t^{(q)}$。
+
+  \vspace{0.2cm}
+  \textbf{Overlap Ratio}：师生 top-$k$ 集合的重合比例。
+  \[
+    \mathcal{M}_{\text{overlap}} \triangleq \mathbb{E}_{t} \left[ \frac{|S_t^{(p)} \cap S_t^{(q)}|}{k} \right]
+  \]
+
+  \textbf{Overlap-Token Advantage}：重合 Token 上学生与教师归一化概率的加权差异，趋于 $0$ 表示对齐。
+  \[
+    \mathcal{M}_{\text{adv}} \triangleq \mathbb{E}_{t}\!\left[ \frac{1}{|S_t^{(p)} \cap S_t^{(q)}|} \sum_{v \in S_t^{(p)} \cap S_t^{(q)}} \bar{p}_t(v) \bigl(\log \bar{q}_t(v) - \log \bar{p}_t(v)\bigr) \right]
+  \]
+
+  \textbf{Entropy Gap}：师生在学生生成轨迹上的熵差，收敛至 $0$ 表示置信度分布匹配。
+  \[
+    \Delta H_t = \left| H(q_t) - H(p_t) \right|
+  \]
+\end{frame}
+
+% Slide 3: 现象1.1：初始匹配度判据 (实验设置与教师性能)
+\begin{frame}[t]{\underline{现象1.1：} 初始匹配度 (实验设置)}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \small
+      \textbf{实验设置}：
+      \begin{itemize}
+        \item \textbf{学生模型}：Qwen3-1.7B-Base
+        \item \textbf{教师模型}：
+          \begin{itemize}
+            \item Qwen3-4B-Base-GRPO (同系列RL)
+            \item Qwen3-4B (不同系列)
+          \end{itemize}
+      \end{itemize}
+      \vspace{0.3cm}
+      \textbf{初始教师性能}：Qwen3-4B-Base-GRPO是Qwen3-4B-Base经过GRPO训练1 Epoch得到的思考模型，其 Benchmark 性能与常规非思考教师相当。
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=3.8cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/4.1/tch_val/5_1_teacher_perf.pdf}
+    \end{column}
+  \end{columns}
+  \vspace{0.5cm}
+  \footnotesize
+  全文OPD数据集\textbf{皆为DAPO-Math-17K}，后续不再重复标注。
+\end{frame}
+
+% Slide 3: 现象1.2：初始匹配度判据 (蒸馏结果与结论)
+\begin{frame}[t]{\underline{现象1.2：} 初始匹配度 (结果与结论)}
+  \begin{center}
+    \includegraphics[width=\textwidth,height=3.8cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/3.1/3_1_metrics.pdf}
+  \end{center}
+  
+  \footnotesize
+  \textbf{实验结果}：
+  \begin{itemize}
+    \item Qwen3-4B-Base-GRPO的蒸馏效果显著更好；
+    \item 学生与Qwen3-4B-Base-GRPO的分布一致性比Qwen3-4B更高。
+  \end{itemize}
+  
+  \textbf{核心结论}：教师和学生的\text{输出分布}需要尽量一致。
+\end{frame}
+
+% Slide 4: 现象2.1：新输出模式的作用 (实验设置)
+\begin{frame}[t]{\underline{现象2.1：} 新输出模式的作用 (实验设置)}
+  \footnotesize
+  \textbf{实验设置}：\par
+  为了验证“新输出模式”对 OPD 蒸馏的影响，本实验在 DeepSeek-Distill 和 Qwen 两个模型家族上，分别对比了使用\textbf{RL后教师}与\textbf{无RL教师}进行蒸馏的效果。
+
+  \begin{itemize}
+    \item \textbf{DeepSeek 家族实验设置}：
+      \begin{itemize}
+        \item 学生模型：DeepSeek-R1-Distill-Qwen-1.5B
+        \item 教师模型：Skywork-OR1-Math-7B \slash R1-Distill-7B
+      \end{itemize}
+    \item \textbf{Qwen 家族实验设置}：
+      \begin{itemize}
+        \item 学生模型：Qwen3-1.7B (Non-thinking)
+        \item 教师模型：Qwen3-4B-Non-Thinking-RL-Math\slash Qwen3-4B
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+% Slide 5: 现象2.2：新输出模式的作用 (结果与结论)
+\begin{frame}[t]{\underline{现象2.2：} 新输出模式的作用 (结果与结论)}
+  \vspace{-0.15cm}
+  \noindent\makebox[\textwidth][c]{%
+    \includegraphics[width=0.52\paperwidth,height=4.25cm,keepaspectratio,trim=42 42 42 38,clip]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/3.2/DS/Figure5A.pdf}\hspace{0.01\paperwidth}%
+    \includegraphics[width=0.52\paperwidth,height=4.25cm,keepaspectratio,trim=42 42 42 38,clip]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/3.2/Qwen/Figure5B.pdf}%
+  }\par
+  \vspace{0.15cm}
+
+  \footnotesize
+  \textbf{实验结果}：DeepSeek 与 Qwen 系列结论一致，纯靠规模变大的常规教师对学生提升非常有限；而经历额外 RL、形成新输出模式的教师能为学生带来显著的性能增益。
+  
+  \textbf{主要结论}：仅仅依靠教师模型分数更高并不足以保证蒸馏的成功，拥有\textbf{新输出模式}的教师，是促成学生有效吸收能力的关键。
+\end{frame}
+
+% Slide 6: 现象3：逆向蒸馏
+\begin{frame}[t]{\underline{现象3：} 逆向蒸馏}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.3\textwidth}
+      \footnotesize
+      \textbf{实验设置}：
+      \begin{itemize}
+        \item 学生：JustRL-DeepSeek-1.5B
+        \item 教师：
+        \begin{itemize}
+          \item R1-Distill-1.5B
+          \item R1-Distill-7B
+        \end{itemize}
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.7\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4.5cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/3.2/JustRL/JustRL_val.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.2cm}
+  \footnotesize
+  \textbf{结果}：
+  \begin{itemize}
+    \item 从无RL同规模教师蒸馏时，学生退回无 RL 水平；
+    \item 增大无RL教师的规模，退化轨迹和结果几乎一致。
+  \end{itemize}
+  \textbf{主要结论}：教师规模和分数不能决定OPD效果。
+\end{frame}
+
+% Slide 7: 分析1.1：渐进对齐 (实验设置)
+\begin{frame}[t]{\underline{分析1.1：} 高概率 Token 渐进对齐 (实验设置)}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.3\textwidth}
+      \footnotesize
+      \textbf{实验设置}：
+      \begin{itemize}
+        \item 学生：R1-Distill-1.5B
+        \item 教师：
+        \begin{itemize}
+          \item JustRL-1.5B (经 RL)
+          \item R1-Distill-7B (无 RL)
+        \end{itemize}
+      \end{itemize}
+      \vspace{0.2cm}
+      \footnotesize
+    \end{column}
+    \begin{column}{0.68\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4.5cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/5.1/5_1_combined.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.5cm}
+  \footnotesize
+  两者 Benchmark 性能相当（7B 略高），但蒸馏结果截然不同。\par
+  \textbf{准确率结果}：成功设置恢复了 $80\%$+ 的师生性能差距；失败设置无任何提升。
+\end{frame}
+
+% Slide 8: 分析1.2：渐进对齐 (动力学)
+\begin{frame}[t]{\underline{分析1.2：} 高概率 Token 渐进对齐 (动力学)}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.3\textwidth}
+      \footnotesize
+      \textbf{三个对齐指标的动态对比}：
+      \begin{itemize}
+        \item \textbf{Overlap Ratio}（重合率）：成功设置从 $72\%$ 稳步升至 $91\%$ 以上，失败设置停滞。
+        \item \textbf{Overlap-Token Advantage}（优势度）：成功设置趋向 $0$（学生在重合 Token 上的概率权重追上教师），失败设置无变化。
+      \end{itemize}
+      \vspace{0.2cm}
+      \footnotesize
+    \end{column}
+    \begin{column}{0.68\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4.5cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/5.1/5_1_combined.pdf}
+    \end{column}
+  \end{columns}
+
+  \footnotesize
+  \begin{itemize}
+    \item \textbf{Entropy Gap}（熵差）：成功设置收敛（学生置信度分布趋近教师），失败设置不收敛。
+  \end{itemize}
+\end{frame}
+
+% Slide 9: 分析2：仅优化共享 Token 便足够
+\begin{frame}[t]{\underline{分析2：} 仅优化共享 Token 便足够}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.3\textwidth}
+      \footnotesize
+      \textbf{实验设置}：
+      \begin{itemize}
+        \item 学生：R1-Distill-1.5B
+        \item 教师：JustRL-1.5B
+      \end{itemize}
+      \vspace{0.2cm}
+      \textbf{消融变体}：
+      \begin{itemize}
+        \item Student Top-$k$：优化全支持域
+        \item Overlap Top-$k$：只优化交集
+        \item Non-Overlap Top-$k$：只优化差集
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.68\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4.5cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/5.2/5_2_combined.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.15cm}
+  \footnotesize
+  \textbf{主要结论}：仅优化 Overlap Top-$k$ 即可匹配 Student Top-$k$ 的全部增益，非重合部分几乎无贡献。
+\end{frame}
+
+% Slide 10: 配方1：教师 Rollout 离策冷启动
+\begin{frame}[t]{\underline{配方1：} 学生SFT冷启动}
+  \footnotesize
+  \textbf{动机}：师生分布差异大时直接 OPD 效果差，先 SFT 拉近距离。
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.3\textwidth}
+      \textbf{实验设置}：（同现象1）
+      \begin{itemize}
+        \item 学生：Qwen3-1.7B-Base
+        \item 教师：Qwen3-4B (Non-thinking)
+      \end{itemize}
+      \vspace{0.1cm}
+      \textbf{两阶段训练}：
+      \begin{itemize}
+        \item SFT：用教师在OpenThoughts3生成的200K数据微调学生
+        \item OPD
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.68\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4.2cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/4.2/4_2_combined.pdf}
+    \end{column}
+  \end{columns}
+  \footnotesize
+  \vspace{0.3cm}
+  \textbf{结果}：SFT 冷启动显著拉高初始 Overlap、降低熵差，提升后续 OPD 最终性能上限。
+\end{frame}
+
+% Slide 11: 配方2.1：对齐后训练提示词 (模板对齐)
+\begin{frame}[t]{\underline{配方2：} 对齐教师后训练模板}
+  \footnotesize
+  \textbf{动机}：教师策略由后训练时见过的提示词塑造，匹配其模板可提升分布兼容性。
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.3\textwidth}
+      \footnotesize
+      \textbf{实验设置}：
+      \begin{itemize}
+        \item 学生：R1-Distill-1.5B
+        \item 教师：JustRL-1.5B
+      \end{itemize}
+      \vspace{0.2cm}
+      \textbf{模板对比}（同为DAPO-Math-17K）：
+      \begin{itemize}
+        \item DAPO格式（数据集原格式）
+        \item 统一\texttt{boxed}格式（教师后训练数据格式）
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.68\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4.5cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/4.3/4_3_Same.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.15cm}
+  \footnotesize
+  \textbf{结果}：仅切换模板即带来更高的 Overlap 增长和准确率提升，模板一致性在 Token 级别强烈影响分布兼容性。
+\end{frame}
+
+% Slide 12: 配方2.2：对齐后训练提示词 (内容与混合)
+\begin{frame}[t]{\underline{配方3：} 对齐教师后训练题目}
+  \footnotesize
+  \textbf{动机}：使用教师后训练时的相同数据集，可以。
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.3\textwidth}
+      \footnotesize
+      \textbf{实验设置}：
+      \begin{itemize}
+        \item 学生：Qwen3-1.7B-Base
+        \item 教师：Qwen3-4B-Base-GRPO
+      \end{itemize}
+      \vspace{0.2cm}
+      \textbf{训练数据对比}：
+      \begin{itemize}
+        \item DAPO-Math-17K（教师 RL 数据集）
+        \item DeepMath 子集（同领域 OOD 数据集）
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.68\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4.5cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/4.3/4_3_Diff.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.15cm}
+  \footnotesize
+  \textbf{结果}：教师在后训练过的数据集上教学，能与学生有\textbf{更多重叠token}，但仅用这些数据会导致\textbf{熵过度降低}。
+\end{frame}
+
+% Slide 13: 讨论1：响应长度存在最佳区间
+\begin{frame}[t]{\underline{讨论1：} 响应长度的最佳区间}
+  \footnotesize
+  \textbf{问题}：教师的 token 级奖励在学生生成的前缀上计算，前缀越长漂移越大，奖励质量会下降？
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.25\textwidth}
+      \textbf{实验设置}：
+      \begin{itemize}
+        \item 学生：R1-Distill-1.5B
+        \item 教师：JustRL-1.5B
+      \end{itemize}
+      \textbf{变量}：最大响应长度 0.5K--15K
+    \end{column}
+    \begin{column}{0.74\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=4.2cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/6.1.2/6_1_response_summary.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.1cm}
+  \footnotesize
+  \textbf{关键发现}：3K--7K 最佳；教师相对于学生的优势随前缀长度单调下降。
+\end{frame}
+
+% Slide 14: 讨论2：Sampled-Token Reward 已足够
+\begin{frame}[t]{\underline{讨论2：} Top-K的超参K选择}
+  \footnotesize
+  \textbf{问题}：Top-$k$ OPD 需要选择支撑集大小 $k$，这个超参数如何选择？
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.2\textwidth}
+      \textbf{实验设置}：
+      \begin{itemize}
+        \item 学生：R1-Distill-1.5B
+        \item 教师：JustRL-1.5B
+      \end{itemize}
+      \vspace{0.1cm}
+      \textbf{变量}：\par
+      Sampled-Token vs \par
+      Top-$k$ ($k{=}1,4,16,64$)
+    \end{column}
+    \begin{column}{0.9\textwidth}
+      \centering
+      \includegraphics[width=\linewidth,height=2.2cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/6.2/5_1_effect_of_k_topk.pdf}\\[0.1cm]
+      \includegraphics[width=\linewidth,height=2.2cm,keepaspectratio]{references/Rethinking On-Policy Distillation of Large Language Models Phenomenology, Mechanism, and Recipe/Figures/6.2/6_2_combined.pdf}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.1cm}
+  \footnotesize
+  \textbf{关键发现}：$k{\ge}4$ 与 Sampled-Token 性能相当，Top-1 因 mode-concentrated 选择规则导致不稳定。OPD 的 $k$ 不是关键超参，避免退化的 Top-1 即可。
+\end{frame}
+
+% Slide 16: 总结
+\begin{frame}[t]{总结}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \small
+      \textbf{OPD 何时有效？}
+      \begin{itemize}
+        \item 师生需要是同一系列模型；
+        \item 教师需具备学生尚未拥有的新输出模式，不仅是分数更高；
+        \item 响应长度在最佳区间（3K--7K）。
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      \textbf{最佳 Recipe}
+      \begin{itemize}
+        \item 用教师生成的 Rollout 对学生做 SFT 冷启动，拉高初始 Overlap。
+        \item 对齐教师后训练时的提示词模板，提升分布兼容性；
+        \item 使用教师后训练数据，但需混合 OOD 数据以防熵坍塌；
+        \item Sampled-Token 或 Top-$k$ ($k{\ge}4$)。
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\end{document}

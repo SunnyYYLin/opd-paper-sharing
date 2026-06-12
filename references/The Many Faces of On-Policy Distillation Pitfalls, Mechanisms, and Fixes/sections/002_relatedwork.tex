@@ -1,0 +1,8 @@
+\section{Related Work}
+
+\paragraph{On-Policy Distillation and Context Distillation.}
+\textbf{On-policy distillation} trains the student on its own sampled trajectories and uses a teacher to provide dense supervision. Agarwal et al.~\cite{agarwal2024onpolicydistillationlanguagemodels} show that this formulation can outperform standard off-policy distillation, and later work demonstrates its effectiveness for math reasoning~\cite{lu2025onpolicydistillation}. A closely related topic is \textbf{context distillation}, which turns in-context behaviors into model parameters. Prior work shows that models can distill instructions and knowledge from context into persistent capabilities~\cite{snell2022learningdistillingcontext}. Recent work extends this idea to on-policy distillation for continual learning~\cite{shenfeld2026selfdistillationenablescontinuallearning, ye2026onpolicycontextdistillationlanguage}.
+
+
+\paragraph{Reinforcement Learning from Textual Feedback.}
+Another related direction augments reinforcement learning with language-based feedback instead of relying only on scalar rewards. Song et al.~\cite{song2026expandingcapabilitiesreinforcementlearning} show that textual feedback can provide richer supervision over intermediate behaviors and improve agent capabilities. In reasoning tasks, POPE~\cite{qu2026popelearningreasonhard} uses privileged guidance to improve exploration on hard problems. Compared with these methods, our work also studies the role of additional textual information, but focuses on on-policy distillation rather than reinforcement learning objectives.

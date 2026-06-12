@@ -1,0 +1,1528 @@
+\appendix
+
+\section{Appendix}
+
+
+\subsection{Experiment Setup}
+\label{app:opd_hparams}
+
+
+We use a maximum response length of $16384$, temperature $1.0$, and top-$p$ $0.95$ for evaluation.
+
+Table~\ref{tab:train_hparams} summarizes the main hyperparameters for OPD, OPSD, GRPO, and PPO. Unless otherwise specified, OPD and OPSD use one rollout per prompt and optimize a stop-gradient, renormalized Top-$K$ reverse-KL objective. OPSD disables thinking mode and uses the step-0 student checkpoint as the fixed teacher model by default. All experiments are conducted on a server with 10 * NVIDIA RTX PRO 6000 Blackwell GPUs.
+
+\begin{table}[h]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Category} & \textbf{OPD} & \textbf{OPSD} & \textbf{GRPO} & \textbf{PPO} \\
+\midrule
+Rollout batch size & $64$ & $64$ & $32$ & $64$ \\
+Prompts per batch & $64$ & $64$ & $32$ & $64$ \\
+Samples per prompt & $1$ & $1$ & $8$ & $1$ \\
+Maximum rollout response length & $4096$ & $4096$ & $8192$ & $8192$ \\
+Rollout temperature & $1.0$ & $1.0$ & $1.0$ & $1.0$ \\
+Rollout top-$p$ & $0.95$ & $0.95$ & $0.95$ & $0.95$ \\
+\midrule
+Optimizer & Adam & Adam & Adam & Adam \\
+Learning rate & $2\times 10^{-6}$ & $2\times 10^{-6}$ & $2\times 10^{-6}$ & $2\times 10^{-6}$ \\
+Learning-rate schedule & cosine decay & cosine decay & cosine decay & cosine decay \\
+Warmup fraction & $0.1$ & $0.1$ & $0.1$ & $0.1$ \\
+Weight decay & $0.1$ & $0.1$ & $0.1$ & $0.1$ \\
+Adam $\beta_1$ / $\beta_2$ & $0.9$ / $0.98$ & $0.9$ / $0.98$ & $0.9$ / $0.98$ & $0.9$ / $0.98$ \\
+\midrule
+Training objective & Top-$K$ reverse KL & Top-$K$ reverse KL & policy gradient & PPO \\
+KL / regularization coefficient & -- & -- & $0.0$ & $0.0$ \\
+Top-$K$ & $20$ & $20$ & -- & -- \\
+Advantage estimator & -- & -- & GRPO & GAE \\
+GAE $\gamma$ / $\lambda$ & -- & -- & -- & $1.0$ / $0.95$ \\
+Teacher privileged information & none & final answer / full response & -- & -- \\
+Teacher model & external teacher & step-0 student & -- & -- \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\caption{Default training hyperparameters for OPD, OPSD, GRPO, and PPO.}
+\label{tab:train_hparams}
+\end{table}
+
+
+\subsection{Evaluation Metrics}
+Here we provide a detailed definition of several metrics appeared in the figures. Let \(y=(y_1,\dots,y_T)\) be a generated response. For token position \(t\), let \(x,y_{<t}\) denote the prompt together with the previously generated prefix up to position \(t-1\). We define the teacher and student log-probabilities of the sampled token \(y_t\) as
+\[
+l_T(t)=\log \pi_T(y_t\mid x,y_{<t},I),
+\qquad
+l_S(t)=\log \pi_S(y_t\mid x,y_{<t}),
+\]
+and their log-probability gap as
+\[
+\Delta \text{logprob}_t=l_T(t)-l_S(t).
+\]
+
+\paragraph{Repetition.}
+We identify repetition using an \(n\)-gram criterion with default \(n=3\). A token position \(t\) is marked as repetitive if the \(n\)-gram ending at \(t\) has appeared previously in the same response. Formally, let \(r_t=1\) if \((y_{t-n+1},\dots,y_t)\) has occurred earlier in the sequence, and \(r_t=0\) otherwise. The repetition ratio is
+\[
+\mathrm{RepRatio}=\frac{1}{N}\sum_t r_t,
+\]
+where \(N\) is the number of valid response tokens. We further partition token positions into repetitive and non-repetitive sets,
+\[
+\mathcal{R}=\{t:r_t=1\},\qquad \mathcal{O}=\{t:r_t=0\},
+\]
+and for any token-level quantity \(a_t\), define the conditional averages
+\[
+\bar a_{\mathrm{rep}}=\frac{1}{|\mathcal R|}\sum_{t\in\mathcal R} a_t,
+\qquad
+\bar a_{\mathrm{other}}=\frac{1}{|\mathcal O|}\sum_{t\in\mathcal O} a_t.
+\]
+
+\paragraph{Teacher-student agreement.}
+To measure local agreement between teacher and student token distributions, we compare their TopK candidate sets at each position, with default \(K=50\). Let \(\mathrm{TopK}_T(t)\) and \(\mathrm{TopK}_S(t)\) denote the teacher and student TopK sets at position \(t\). We define the token-level overlap as
+\[
+\mathrm{Overlap}_t=\frac{|\mathrm{TopK}_T(t)\cap \mathrm{TopK}_S(t)|}{K}.
+\]
+We also record the teacher-side rank of the sampled token \(y_t\):
+\[
+\mathrm{Rank@K}_t=
+\begin{cases}
+\mathrm{rank}_{\pi_T}(y_t\mid x,y_{<t},I), & y_t\in \mathrm{TopK}_T(t),\\
+K+1, & \text{otherwise}.
+\end{cases}
+\]
+Finally, we report repetition-conditional averages of \(\mathrm{Overlap}_t\) and \(\mathrm{Rank@K}_t\) over \(\mathcal R\) and \(\mathcal O\).
+
+
+
+\subsection{Design Space of OP(S)D}
+
+An OP(S)D algorithm is characterized by three largely orthogonal design axes: teacher construction, privileged information design, and distillation loss. In practice, the first two axes, teacher construction and privileged information design, are primarily specific to OPSD, since in standard OPD the teacher is typically a fixed model and no privileged information is introduced. By contrast, the distillation loss is a central design choice for both OPSD and OPD.
+
+\subsubsection{Teacher Construction}
+
+A first design choice is how the teacher policy $\pi_T$ is constructed.
+
+\paragraph{Self-Teacher.} uses exactly the same model as the student. Let $c$ denote the privileged information. The teacher is
+\[
+\pi_T(\cdot \mid x, y_{<t}, c)
+=
+\pi_\theta(\cdot \mid x, y_{<t}, c).
+\]
+Here, the teacher and student share the same parameters $\theta$, so the teacher is updated jointly with the student throughout training. This setup has appeared in several papers such as \cite{zhao2026selfdistilledreasoneronpolicyselfdistillation,ye2026onpolicycontextdistillationlanguage}.
+
+\paragraph{Frozen teacher.}
+A second option is to fix the teacher parameters throughout training. One simple instantiation is to initialize the teacher from the student at the beginning of training and then keep it frozen:
+\[
+\pi_T(\cdot \mid x, y_{<t}, c)
+=
+\pi_{\bar{\theta}}(\cdot \mid x, y_{<t}, c),
+\qquad
+\bar{\theta} = \theta^{(0)},
+\]
+where $\theta^{(0)}$ denotes the student parameters at initialization. More generally, $\pi_{\bar{\theta}}$ could also be a stronger pretrained model or a separately trained expert policy. This design often improves stability, since the teacher target does not drift during optimization, but it may become stale as the student improves, and can also induce mismatch between the teacher's behavior and the student-induced state distribution.
+
+\paragraph{exponential moving average (EMA) teacher.}
+
+An intermediate design is to maintain a moving teacher whose parameters track the student through EMA:
+\[
+\bar{\theta}_{k}
+=
+\alpha \bar{\theta}_{k-1} + (1-\alpha)\theta_k,
+\qquad \alpha \in [0,1),
+\]
+and define
+\[
+\pi_T(\cdot \mid x, y_{<t}, c)
+=
+\pi_{\bar{\theta}_k}(\cdot \mid x, y_{<t}, c).
+\]
+This construction preserves the self-distillation flavor while providing a more stable target than the fully coupled teacher $\pi_\theta$. Intuitively, the EMA teacher smooths high-variance parameter updates, tracks the student's learning progress, and avoids the instability that can arise when the current student is used directly as its own target. \cite{shenfeld2026selfdistillationenablescontinuallearning,hubotter2026reinforcementlearningselfdistillation}
+
+\noindent\textcolor{purple}{\textbf{Takeaway.}} A frozen teacher is stable, but its capability is inherently bounded. In contrast, an EMA teacher or self teacher is often assumed to better exploit privileged information, yet this advantage is not guaranteed in practice. Unless the teacher itself is directly optimized for the task objective, for example via RL, there is little reason to expect plain OP(S)D alone to produce a teacher that is stronger than the original base teacher in leveraging privileged information to solve the task.
+
+
+
+
+
+\subsubsection{Privileged Information Design}
+A third design choice concerns how privileged information is constructed for the teacher. Depending on the task, privileged information can take several forms. For math reasoning, it may consist of ground-truth reasoning together with the final answer, or a lighter variant that provides only the answer \cite{zhao2026selfdistilledreasoneronpolicyselfdistillation}. For agentic tasks, it may come from environment feedback, such as tool execution results, verifier signals, or environment observations \cite{hubotter2026reinforcementlearningselfdistillation}. It can also be derived from past experience, for example when an external model summarizes interaction history into high-level guidance that the teacher conditions on \cite{wang2026openclawrltrainagentsimply,ye2026onpolicycontextdistillationlanguage}. This last form is especially useful when raw feedback is long or difficult to use directly.
+
+
+
+
+\subsubsection{Distillation Objectives}
+
+The remaining choice is how the student matches the teacher. This design is closely related to the KL regularization commonly used in PPO-style training \cite{schulman2017proximalpolicyoptimizationalgorithms}, where the policy is regularized using a reference model. In our setting, the teacher plays a similar role, and the distillation signal can be implemented either by a full-vocabulary KL or by sampled-token KL estimators.
+
+
+
+
+\paragraph{Full-vocabulary objectives.}
+\label{subsubsection:full_vocab_loss}
+
+A standard choice is to match the student and teacher token distributions at
+each position using a distribution-level divergence. Let
+\(\pi_\theta(\cdot \mid x, y_{<i})\) denote the student distribution at step
+\(i\), and let \(\pi_T(\cdot \mid x, c, y_{<i})\) denote the teacher
+distribution. We optimize
+\[
+\mathcal{L}_{\mathrm{full}}(\theta)
+=
+\mathbb{E}_{x\sim\mathcal D,\; y\sim\pi_\theta(\cdot\mid x)}
+\left[
+\frac{1}{T}\sum_{i=1}^T \ell_i^{\mathrm{full}}
+\right].
+\]
+
+Common choices for \(\ell_i^{\mathrm{full}}\) include reverse-KL,
+\[
+D_{\mathrm{KL}}\!\left(
+\pi_\theta(\cdot\mid x,y_{<i})
+\;\middle\|\;
+\pi_T(\cdot\mid x,c,y_{<i})
+\right),
+\]
+forward-KL,
+\[
+D_{\mathrm{KL}}\!\left(
+\pi_T(\cdot\mid x,c,y_{<i})
+\;\middle\|\;
+\pi_\theta(\cdot\mid x,y_{<i})
+\right),
+\]
+and Jensen-Shannon divergence,
+\[
+\beta\,
+D_{\mathrm{KL}}\!\left(
+\pi_\theta(\cdot\mid x,y_{<i})
+\;\middle\|\;
+m_i
+\right)
++
+(1-\beta)\,
+D_{\mathrm{KL}}\!\left(
+\pi_T(\cdot\mid x,c,y_{<i})
+\;\middle\|\;
+m_i
+\right),
+\]
+where
+\[
+m_i
+=
+\beta\,\pi_\theta(\cdot\mid x,y_{<i})
++
+(1-\beta)\,\pi_T(\cdot\mid x,c,y_{<i}).
+\]
+
+These objectives require full-vocabulary probabilities at every position and
+can be memory-intensive. A common approximation is to restrict computation to a
+TopK set \(S_i \subseteq \mathcal V\), selected either from the teacher \cite{fu2026revisitingonpolicydistillationempirical}
+or from the student \cite{zhao2026selfdistilledreasoneronpolicyselfdistillation, hubotter2026reinforcementlearningselfdistillation}:
+\[
+S_i^{T}
+=
+\operatorname{TopK}\!\left(
+\pi_T(\cdot\mid x,c,y_{<i}),\,k
+\right),
+\qquad
+S_i^{S}
+=
+\operatorname{TopK}\!\left(
+\pi_\theta(\cdot\mid x,y_{<i}),\,k
+\right).
+\]
+
+Given a chosen set \(S_i\), the truncated reverse-KL and forward-KL are
+\[
+D_{\mathrm{KL}}^{S_i}\!\left(
+\pi_\theta
+\;\middle\|\;
+\pi_T
+\right)
+=
+\sum_{v\in S_i}
+\pi_\theta(v\mid x,y_{<i})
+\log
+\frac{
+\pi_\theta(v\mid x,y_{<i})
+}{
+\pi_T(v\mid x,c,y_{<i})
+},
+\]
+and
+\[
+D_{\mathrm{KL}}^{S_i}\!\left(
+\pi_T
+\;\middle\|\;
+\pi_\theta
+\right)
+=
+\sum_{v\in S_i}
+\pi_T(v\mid x,c,y_{<i})
+\log
+\frac{
+\pi_T(v\mid x,c,y_{<i})
+}{
+\pi_\theta(v\mid x,y_{<i})
+}.
+\]
+Similarly, the truncated Jensen-Shannon divergence is
+\[
+\mathrm{JSD}^{S_i}\!\left(
+\pi_\theta,\pi_T
+\right)
+=
+\beta\,
+D_{\mathrm{KL}}^{S_i}\!\left(
+\pi_\theta
+\;\middle\|\;
+m_i
+\right)
++
+(1-\beta)\,
+D_{\mathrm{KL}}^{S_i}\!\left(
+\pi_T
+\;\middle\|\;
+m_i
+\right).
+\]
+
+A further refinement is to aggregate the probability mass outside \(S_i\) into
+a single tail distribution. For example, in SDPO~\cite{hubotter2026reinforcementlearningselfdistillation},
+\(S_i\) is chosen as the student TopK, they define
+\[
+p_i^{\mathrm{tail}}
+=
+1-\sum_{v\in S_i}\pi_\theta(v\mid x,y_{<i}),
+\qquad
+q_i^{\mathrm{tail}}
+=
+1-\sum_{v\in S_i}\pi_T(v\mid x,c,y_{<i}),
+\]
+and use the augmented reverse-KL
+\[
+\widetilde D_{\mathrm{KL}}^{S_i}\!\left(
+\pi_\theta
+\;\middle\|\;
+\pi_T
+\right)
+=
+\sum_{v\in S_i}
+\pi_\theta(v\mid x,y_{<i})
+\log
+\frac{
+\pi_\theta(v\mid x,y_{<i})
+}{
+\pi_T(v\mid x,c,y_{<i})
+}
++
+p_i^{\mathrm{tail}}
+\log
+\frac{
+p_i^{\mathrm{tail}}
+}{
+q_i^{\mathrm{tail}}
+}.
+\]
+Analogous tail-augmented forms can be defined for forward-KL and JSD. This
+preserves the remaining probability mass and is often a better approximation
+than simply truncating the support.
+
+
+\paragraph{Sampled-token objectives.}
+\label{subsubsection:sampled_token_loss}
+
+Instead of matching the full teacher distribution, one may construct a sampled-token signal using only the teacher and student log-probabilities on tokens sampled from the student policy. Let
+\[
+A_t
+=
+\log \pi_T(y_t\mid x,c,y_{<t})
+-
+\log \pi_\theta(y_t\mid x,y_{<t}),
+\qquad
+y_t \sim \pi_\theta(\cdot \mid x,y_{<t}).
+\]
+Then
+\[
+-A_t
+=
+\log \pi_\theta(y_t\mid x,y_{<t})
+-
+\log \pi_T(y_t\mid x,c,y_{<t}),
+\]
+whose expectation under \(y_t \sim \pi_\theta(\cdot\mid x,y_{<t})\) recovers the token-level reverse KL. Following PPO-style KL regularization, one may also consider alternative sampled surrogates such as
+\[
+k_{1,t} = -A_t,
+\qquad
+k_{2,t} = \frac{1}{2}A_t^2,
+\qquad
+k_{3,t} = e^{A_t} - 1 - A_t.
+\]
+These estimators differ in bias, variance, and non-negativity properties. \(k_3\) is commonly used as a low-variance, non-negative KL surrogate.
+
+In practice, sampled-token OP(S)D is usually optimized in a policy-gradient form:
+\[
+\mathcal{L}_{\mathrm{sample}}(\theta)
+=
+-
+\mathbb{E}_{x\sim\mathcal D,\; y\sim\pi_\theta(\cdot\mid x)}
+\left[
+\frac{1}{T}\sum_{t=1}^T
+A_t\,
+\log \pi_\theta(y_t\mid x,y_{<t})
+\right],
+\]
+
+Compared with full-vocabulary objectives, this sampled-token form only changes
+the probability of tokens actually sampled by the student. It behaves
+more like reinforcement learning with a dense token-level reward, whereas
+full-vocabulary KL directly reshapes the entire next-token distribution.
+
+
+% \paragraph{Gradient computation.}
+% The exact OP(S)D gradient contains both a direct differentiation term and a
+% rollout score-function term. In practice, we stop gradients through the teacher
+% and the sampled trajectory, but the resulting approximation differs across
+% objectives.
+
+% For full-vocabulary reverse KL,
+% \[
+% \nabla_\theta \mathcal{L}_{\mathrm{vocab}}(\theta)
+% =
+% -
+% \mathbb{E}_{x,y}
+% \left[
+% \frac{1}{T}\sum_{t=1}^T
+% \mathbb{E}_{v\sim\pi_\theta(\cdot\mid x,y_{<t})}
+% \bigl[
+% A_t(v)\,\nabla_\theta \log \pi_\theta(v\mid x,y_{<t})
+% \bigr]
+% \right],
+% \]
+% where
+% \[
+% A_t(v)
+% =
+% \log \pi_T(v\mid x,c,y_{<t})
+% -
+% \log \pi_\theta(v\mid x,y_{<t}).
+% \]
+% This approximation keeps the direct reverse-KL gradient and drops only the
+% policy gradient term.
+
+% For sampled-token objectives, most implementations  drop the direct gradient term and use the approximation:
+% \[
+% \nabla_\theta \mathcal{L}_{\mathrm{sample}}(\theta)
+% =
+% -
+% \mathbb{E}_{x,y}
+% \left[
+% \frac{1}{T}\sum_{t=1}^T
+% A_t(y_t)\,
+% \nabla_\theta \log \pi_\theta(y_t\mid x,y_{<t})
+% \right].
+% \]
+
+
+
+
+
+
+
+
+\paragraph{Combination with policy gradient.}
+The OP(S)D learning signal can be combined with reinforcement learning in two ways. One option is to optimize it as a regularization term:
+\[
+\mathcal{L}_{\mathrm{total}}(\theta)
+=
+\mathcal{L}_{\mathrm{RL}}(\theta)
++
+\lambda \mathcal{L}_{\mathrm{OPD}}(\theta),
+\]
+where \(\mathcal{L}_{\mathrm{RL}}(\theta)\) denotes the standard RL loss, and \(\mathcal{L}_{\mathrm{OPD}}(\theta)\) is an OP(S)D objective. Alternatively, OP(S)D can be treated as a token-level advantage. We define the total advantage as
+\[
+A_t^{\mathrm{total}}
+=
+A_t^{\mathrm{RL}}
++
+\lambda A_t^{\mathrm{OPD}},
+\]
+and optimize the objective
+\[
+\mathcal{L}(\theta)
+=
+-
+\mathbb{E}_{x,\;y\sim\pi_\theta}
+\left[
+\frac{1}{T}\sum_{t=1}^T
+A_t^{\mathrm{total}}
+\log \pi_\theta(y_t\mid x,y_{<t})
+\right].
+\]
+
+\noindent\textcolor{purple}{\textbf{Takeaway.}}
+When incorporated into the advantage, OP(S)D is typically designed in a sampled-token form so that it aligns naturally with token-level policy gradient updates. When OP(S)D is used as an auxiliary regularization loss, it is more commonly implemented as a vocabulary-level objective that matches the full teacher distribution.
+
+
+
+
+
+
+\subsection{General OP(S)D Gradient Decomposition.} 
+Consider the objective
+\[
+\mathcal{L}_{\mathrm{OPD}}(\theta)
+=
+\mathbb{E}_{x\sim \mathcal{D},\; y\sim \pi_\theta(\cdot\mid x)}
+\bigl[\ell(\theta; x,y)\bigr].
+\]
+For a fixed input \(x\), define
+\[
+\mathcal{L}_x(\theta)
+=
+\mathbb{E}_{y\sim \pi_\theta(\cdot\mid x)}
+\bigl[\ell(\theta; x,y)\bigr]
+=
+\sum_y \pi_\theta(y\mid x)\,\ell(\theta; x,y).
+\]
+Differentiating with respect to \(\theta\), we obtain
+\[
+\nabla_\theta \mathcal{L}_x(\theta)
+=
+\nabla_\theta \sum_y \pi_\theta(y\mid x)\,\ell(\theta; x,y)
+\]
+\[
+=
+\sum_y \nabla_\theta\!\Bigl(\pi_\theta(y\mid x)\,\ell(\theta; x,y)\Bigr)
+\]
+\[
+=
+\sum_y
+\Bigl[
+(\nabla_\theta \pi_\theta(y\mid x))\,\ell(\theta; x,y)
++
+\pi_\theta(y\mid x)\,\nabla_\theta \ell(\theta; x,y)
+\Bigr]
+\]
+\[
+=
+\sum_y \pi_\theta(y\mid x)\,\nabla_\theta \ell(\theta; x,y)
++
+\sum_y \ell(\theta; x,y)\,\nabla_\theta \pi_\theta(y\mid x).
+\]
+Using the identity
+\[
+\nabla_\theta \pi_\theta(y\mid x)
+=
+\pi_\theta(y\mid x)\,\nabla_\theta \log \pi_\theta(y\mid x),
+\]
+we get
+\[
+\nabla_\theta \mathcal{L}_x(\theta)
+=
+\sum_y \pi_\theta(y\mid x)\,\nabla_\theta \ell(\theta; x,y)
++
+\sum_y \ell(\theta; x,y)\,\pi_\theta(y\mid x)\,\nabla_\theta \log \pi_\theta(y\mid x)
+\]
+\[
+=
+\mathbb{E}_{y\sim \pi_\theta(\cdot\mid x)}
+\bigl[\nabla_\theta \ell(\theta; x,y)\bigr]
++
+\mathbb{E}_{y\sim \pi_\theta(\cdot\mid x)}
+\bigl[\ell(\theta; x,y)\,\nabla_\theta \log \pi_\theta(y\mid x)\bigr].
+\]
+Therefore,
+\[
+\nabla_\theta \mathcal{L}_{\mathrm{OPD}}(\theta)
+=
+\mathbb{E}_{x\sim\mathcal D,\; y\sim \pi_\theta(\cdot\mid x)}
+\Bigl[
+\nabla_\theta \ell(\theta; x,y)
++
+\ell(\theta; x,y)\,\nabla_\theta \log \pi_\theta(y\mid x)
+\Bigr].
+\]
+
+The first term is the direct gradient term, which backpropagates
+through the token-level loss on sampled prefixes. The second term is the
+score-function term:
+\[
+\mathbb{E}_{x,y\sim\pi_\theta}
+\bigl[
+\ell(\theta; x,y)\,\nabla_\theta \log \pi_\theta(y\mid x)
+\bigr],
+\]
+which is the sequence-level policy-gradient term induced by the dependence of
+the rollout distribution on \(\theta\).
+
+In many practical on-policy distillation methods, one ignores the score-function
+term and treats sampled trajectories as fixed. This gives the approximate
+gradient
+\[
+g_{\mathrm{approx}}
+=
+\mathbb{E}_{x\sim\mathcal D,\; y\sim \pi_\theta(\cdot\mid x)}
+\bigl[
+\nabla_\theta \ell(\theta; x,y)
+\bigr].
+\]
+This approximation introduces bias, since it omits
+\[
+\mathbb{E}_{x,y\sim\pi_\theta}
+\bigl[
+\ell(\theta; x,y)\,\nabla_\theta \log \pi_\theta(y\mid x)
+\bigr],
+\]
+but it often substantially reduces variance and improves optimization stability.
+By contrast, sequence-level RL-style estimators retain the score-function term,
+which yields an unbiased estimator of the full gradient but typically with much
+higher variance.
+
+
+
+\subsection{Detailed Gradient computation.}
+
+\paragraph{Full-vocabulary reverse-KL.}
+Consider
+\[
+\mathcal{L}_{\mathrm{vocab}}(\theta)
+=
+\mathbb{E}_{x\sim\mathcal D,\; y\sim\pi_\theta(\cdot\mid x)}
+\left[
+\frac{1}{T}\sum_{t=1}^T
+D_{\mathrm{KL}}\!\left(
+\pi_\theta(\cdot\mid x,y_{<t})
+\;\middle\|\;
+\pi_T(\cdot\mid x,c,y_{<t})
+\right)
+\right].
+\]
+Let
+\[
+\ell_t(\theta,y_{<t})
+=
+D_{\mathrm{KL}}\!\left(
+\pi_\theta(\cdot\mid x,y_{<t})
+\;\middle\|\;
+\pi_T(\cdot\mid x,c,y_{<t})
+\right),
+\qquad
+L(\theta,y)=\frac{1}{T}\sum_{t=1}^T \ell_t(\theta,y_{<t}).
+\]
+Since \(\theta\) appears both in the rollout distribution \(y\sim\pi_\theta(\cdot\mid x)\) and explicitly in each \(\ell_t\), the full gradient is
+\[
+\nabla_\theta \mathcal{L}_{\mathrm{vocab}}(\theta)
+=
+\mathbb{E}_{x,y}
+\left[
+L(\theta,y)\nabla_\theta \log \pi_\theta(y\mid x)
++
+\frac{1}{T}\sum_{t=1}^T \nabla_\theta \ell_t(\theta,y_{<t})
+\right].
+\]
+Using \(\log \pi_\theta(y\mid x)=\sum_{t=1}^T \log \pi_\theta(y_t\mid x,y_{<t})\), the rollout term becomes
+\[
+\mathbb{E}_{x,y}
+\left[
+L(\theta,y)\sum_{t=1}^T \nabla_\theta \log \pi_\theta(y_t\mid x,y_{<t})
+\right].
+\]
+
+For the explicit gradient term, define
+\[
+p_t(\cdot)=\pi_\theta(\cdot\mid x,y_{<t}),
+\qquad
+q_t(\cdot)=\pi_T(\cdot\mid x,c,y_{<t}).
+\]
+Then
+\[
+\ell_t=\sum_{v\in\mathcal V} p_t(v)\log\frac{p_t(v)}{q_t(v)},
+\]
+and, treating the teacher as stop-gradient,
+\[
+\nabla_\theta \ell_t
+=
+\mathbb{E}_{v\sim p_t}
+\left[
+\bigl(\log p_t(v)-\log q_t(v)\bigr)\nabla_\theta \log p_t(v)
+\right].
+\]
+Equivalently, with
+\[
+A_t(v)=\log q_t(v)-\log p_t(v),
+\]
+we have
+\[
+\nabla_\theta \ell_t
+=
+-
+\mathbb{E}_{v\sim\pi_\theta(\cdot\mid x,y_{<t})}
+\left[
+A_t(v)\nabla_\theta \log \pi_\theta(v\mid x,y_{<t})
+\right].
+\]
+
+Therefore,
+\[
+\nabla_\theta \mathcal{L}_{\mathrm{vocab}}(\theta)
+=
+\mathbb{E}_{x,y}
+\left[
+L(\theta,y)\sum_{t=1}^T \nabla_\theta \log \pi_\theta(y_t\mid x,y_{<t})
+-
+\frac{1}{T}\sum_{t=1}^T
+\mathbb{E}_{v\sim\pi_\theta(\cdot\mid x,y_{<t})}
+\left[
+A_t(v)\nabla_\theta \log \pi_\theta(v\mid x,y_{<t})
+\right]
+\right].
+\]
+
+In practice, when using full-vocab KL, we ignore the first term:
+\[
+\nabla_\theta \mathcal{L}_{\mathrm{vocab}}(\theta)
+=
+-
+\mathbb{E}_{x,y}
+\left[
+\frac{1}{T}\sum_{t=1}^T
+\mathbb{E}_{v\sim\pi_\theta(\cdot\mid x,y_{<t})}
+\left[
+A_t(v)\nabla_\theta \log \pi_\theta(v\mid x,y_{<t})
+\right]
+\right].
+\]
+
+This approximation is used in SDPO \cite{hubotter2026reinforcementlearningselfdistillation} and SDFT \cite{shenfeld2026selfdistillationenablescontinuallearning}.
+
+\paragraph{Sampled-token reverse-KL.}
+For the sampled-token objective,
+\[
+\mathcal{L}_{\mathrm{sample}}(\theta)
+=
+-
+\mathbb{E}_{x,\; y\sim \pi_\theta(\cdot\mid x)}
+\left[
+R(y)
+\right],
+\qquad
+R(y)=\frac{1}{T}\sum_{t=1}^T r_t,
+\]
+where
+\[
+r_t
+=
+\log \pi_T(y_t\mid x,c,y_{<t})
+-
+\log \pi_\theta(y_t\mid x,y_{<t}).
+\]
+Using the identity
+$
+\nabla_\theta \pi_\theta(y\mid x)
+=
+\pi_\theta(y\mid x)\,\nabla_\theta \log \pi_\theta(y\mid x),
+$ we get 
+\[
+\nabla_\theta \mathcal{L}_{\mathrm{sample}}(\theta)
+=
+-
+\mathbb{E}_{x,\; y}
+\left[
+R(y)\,\nabla_\theta \log \pi_\theta(y\mid x)
++
+\nabla_\theta R(y)
+\right].
+\]
+Since
+\[
+\log \pi_\theta(y\mid x)
+=
+\sum_{s=1}^T \log \pi_\theta(y_s\mid x,y_{<s}),
+\]
+and stopping gradients through the teacher gives
+\[
+\nabla_\theta R(y)
+=
+-\frac{1}{T}\sum_{t=1}^T
+\nabla_\theta \log \pi_\theta(y_t\mid x,y_{<t}),
+\]
+we obtain
+\[
+\nabla_\theta \mathcal{L}_{\mathrm{sample}}(\theta)
+=
+-
+\mathbb{E}_{x,\; y}
+\left[
+\frac{1}{T}\sum_{t=1}^T
+\left(
+r_t-1
+\right)
+\nabla_\theta \log \pi_\theta(y_t\mid x,y_{<t})
+\right].
+\]
+
+While in practice \cite{zhao2026selfdistilledreasoneronpolicyselfdistillation}, people usually ignore the \texttt{-1} term and use
+
+\[
+\nabla_\theta \mathcal{L}_{\mathrm{sample}}(\theta)
+=
+-
+\mathbb{E}_{x,\; y}
+\left[
+\frac{1}{T}\sum_{t=1}^T
+r_t
+\nabla_\theta \log \pi_\theta(y_t\mid x,y_{<t})
+\right].
+\]
+
+
+
+\subsection{TopK Engineering Challenge}
+\label{topkchallenge}
+A practical engineering issue arises in on-policy distillation when we use the student's per-position TopK tokens to query the teacher's corresponding vocabulary probabilities. The root cause is a mismatch between the data structure produced by the distillation pipeline and the interface expected by SGLang.
+
+In our implementation, \texttt{reward\_func} sets \texttt{payload["token\_ids\_logprob"]} to \texttt{requested\_topk\_token\_ids}, which is organized as a per-position list of token sets, \emph{i.e.}, \texttt{[[K IDs at position 0], [K IDs at position 1], \dots]}. However, SGLang's \texttt{token\_ids\_logprob} API does not support position-dependent token lists. Instead, it expects a single flat list of token IDs that is applied uniformly across all positions.
+
+This incompatibility is exposed by the \texttt{compute\_logprobs\_only} path in \texttt{tp\_worker.py}. In that path, the code calls \texttt{get\_token\_ids\_logprobs\_batch\_optimized(logprobs\_shape=[1, vocab], token\_ids\_logprobs=[[per\_pos\_list]])}. As a result, the constructed column index tensor becomes \texttt{torch.tensor([list\_K, list\_K, \dots])}, which has shape \texttt{[L, K]} instead of the expected one-dimensional shape \texttt{[L]}. Consequently, the downstream \texttt{gather} operation fails due to the shape mismatch.
+
+To resolve this issue, we flatten the per-position TopK token IDs into a single sorted set of unique token IDs, and send this flat union as \texttt{token\_ids\_logprob}. Under this representation, the prefill path correctly computes \texttt{logprobs[positions, flat\_union]}, producing a tensor of shape \texttt{[seq\_len, union\_size]}. This format is already compatible with the existing extraction logic in \texttt{\_extract\_response\_aux\_id\_logprob\_maps}, which can recover the relevant teacher log-probabilities for each response position from the shared union vocabulary. Therefore, the fix preserves the intended semantics of querying teacher probabilities on the student's TopK candidates, while making the implementation consistent with SGLang's API contract.
+
+
+
+\subsection{Additional OPD Experiment using Top20 reverse KL}
+\label{app:top20reverseKLexp}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/top20_eval_math500.pdf}
+        \label{fig:4b_char}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/top20_opd_explicit_loss.pdf}
+        \label{fig:4b_emo}
+    \end{subfigure}
+    \vspace{0.5em}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/top20_repeat_ratio.pdf}
+        \label{fig:8b_char}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/top20_task_reward_mean.pdf}
+        \label{fig:8b_emo}
+    \end{subfigure}
+    
+    \begin{subfigure}[t]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/top20_teacherstudent_repeat_logprob.pdf}
+        \label{fig:4b_char}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/top20_teacherstudent_other_logprob.pdf}
+        \label{fig:4b_emo}
+    \end{subfigure}
+    \vspace{0.5em}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/top20_student_logprob.pdf}
+        \label{fig:8b_char}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/top20_teacher_logprob.pdf}
+        \label{fig:8b_emo}
+    \end{subfigure}
+    \caption{Teacher: Qwen3-1.7B-GRPO (nothink), Student: Qwen3-1.7B (nothink), training data: DAPO. reverse KL with stopgrad$\big($logprob($\pi_S$)$\big)$ v.s. reverse KL, TopK=20.}
+    \label{fig:top20reverseKLexp}
+\end{figure}
+
+
+As shown in Figure~\ref{fig:top20reverseKLexp}, simply increasing $K$ from $5$ to $20$ does not eliminate the collapse of reverse KL: the Top20 objective without stop-gradient still shows a similar collapse tendency to Figure~\ref{fig:top5exp}. In contrast, the stop-gradient version remains stable.
+
+\subsection{Evaluation Biases in OPD}
+
+There are two main evaluation biases that can lead to misleading conclusions
+about OPD.
+
+First, the max validation response length can affect the
+measured accuracy in math reasoning. OPD often encourages longer
+or more repetitive reasoning traces. If the maximum generation length during
+validation is too small, responses may be truncated before the model
+reaches the final answer. In this case, an observed increase or decrease in
+accuracy may not reflect a genuine change in reasoning ability, but rather a
+change in whether the model is able to finish its response under the evaluation
+length budget.
+
+Second, comparisons between OPD and RL methods can be biased by
+focusing only on early-stage sample efficiency. OPD may improve faster at the
+beginning of training, while GRPO often improves more
+slowly. However, in our observations, GRPO can continue improving for longer and
+eventually reach higher performance. Thus, claiming that OPD is
+more sample-efficient can be misleading if one ignores the performance ceiling.
+
+
+
+\subsection{Teacher Signal Analysis (On Policiness)}
+
+
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/summary_teacher_groups_smoothed_line.pdf}
+        \caption{$\Delta$logprob per token position, no think}
+        \label{fig:first}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/summary_teacher_groups_smoothed_line_1.pdf}
+        \caption{$\Delta$logprob per token position, think}
+        \label{fig:second}
+    \end{subfigure}
+    
+    \centering
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/summary_teacher_groups_smoothed_line_student8b.pdf}
+        \caption{Student: Qwen3-8B}
+        \label{fig:second}
+    \end{subfigure}
+    \vspace{1mm}
+    \caption{Comparison of teacher signal on responses generated by different student models. $\Delta$logprob shows length-skewed distribution. The experiment used openthoughts \cite{guha2025openthoughtsdatarecipesreasoning}. The Qwen3-8B teacher exhibits stronger signal on Qwen3-1.7B responses than on Qwen3-8B self-generated responses. }
+    \label{app:teacher_signal}
+\end{figure}
+
+As shown in Figure~\ref{app:teacher_signal}, the Qwen3-8B teacher provides stronger supervision for responses generated by Qwen3-1.7B (Figure~\ref{app:teacher_signal}a) than for its own self-generated responses (Figure~\ref{app:teacher_signal}b). This suggests that the teacher signal becomes more pronounced when there is a larger capability gap between the teacher and the student, whereas self-distillation yields a weaker signal overall. In addition, the supervision signal is stronger at earlier token positions. At later positions, different PI types lead to much smaller differences in $\Delta$ log probability, indicating that early-token supervision plays a more important role in distillation.
+
+
+% \subsection{$\Delta$logprob shows correctness-skewed distribution.}
+\subsection{\texorpdfstring{$\Delta \log p$}{Delta log p} is correctness-skewed}
+
+Figure~\ref{fig:correctnessskeweddistribution} shows that token-level KL supervision is substantially weaker on correct trajectories than on incorrect trajectories. The experiments follow the same setup as in Figure~\ref{app:teacher_signal}.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/nothinking_barplot.pdf}
+        \caption{$\Delta$logprob by answer correctness, no think}
+        \label{fig:three}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/thinking_barplot.pdf}
+        \caption{$\Delta$ logprob by answer correctness, think}
+        \label{fig:four}
+    \end{subfigure}
+    \vspace{-1mm}
+    \caption{Comparison of token-level KL supervision distributions for correct and incorrect student responses. Incorrect trajectories has stronger supervision, while correct trajectories has a weaker supervision.}
+    \label{fig:correctnessskeweddistribution}
+\end{figure}
+
+
+\subsection{Visualizing token-level supervision on an example response}
+
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/tokencompare1.pdf}
+        % \caption{First}
+        \label{fig:first}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/tokencompare2.pdf}
+        % \caption{Second}
+        \label{fig:second}
+    \end{subfigure}
+    \vspace{-2mm}
+    \caption{We show token-level heatmap of $\Delta$logprob on last 128 tokens. The experiment is based on openthoughts \cite{guha2025openthoughtsdatarecipesreasoning}, we show an example question. PI strengthens supervision for the same teacher, yet the sampled-token supervision distribution is based more on teacher capability (as shown in the figure, 3 experiments using Qwen3-8B teacher show similar distribution, while 2 experiments using Qwen3-1.7B teacher show another distribution). }
+    \label{fig:tokenlevelvisual}
+\end{figure}
+
+
+
+Figure\ref{fig:tokenlevelvisual} shows the token-level supervision of different teacher designs. While PI can refine the signal, the fundamental distribution of what a student learns is dictated by the teacher's scale and reasoning depth. This underscores the importance of scaling teacher models to provide high-quality supervision.
+
+\subsection{Experimental Results on General Reasoning Tasks}
+
+We further evaluate OPD on general reasoning tasks. We use Qwen3-1.7B as the student model and Qwen3-8B as the teacher model, with the thinking mode disabled for both models. Training is conducted on the Science subset of Mixture of Thoughts, and evaluation is performed on GPQA-Diamond and MMLU-Pro. As shown in Figure~\ref{fig:general-reasoning-appendix}, OPD does not lead to consistent or substantial improvements over the student model across training steps. The performance fluctuates on GPQA-Diamond and remains only marginally improved on MMLU-Pro, suggesting that a stronger teacher does not necessarily provide effective supervision in this setting.
+
+To better understand this failure, we further analyze the token-level teacher--student log-probability gap on the generated trajectories. Figure~\ref{fig:general-reasoning-appendix2} shows that the supervision signal is strongly skewed toward early tokens and gradually weakens as the response becomes longer. Moreover, incorrect responses receive stronger teacher supervision than correct responses, especially on final-answer tokens. This indicates that OPD mainly provides corrective signals for erroneous trajectories, while offering limited useful supervision for already plausible or correct reasoning paths. This phenomenon is highly consistent with our previous observations on mathematical reasoning tasks.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/gpqa_mmlupro_scores_three_labels_side_by_side.pdf}
+    \caption{
+    General reasoning results of OPD training. 
+    The experiment uses the Science subset of Mixture of Thoughts. 
+    OPD does not bring consistent improvements on GPQA-Diamond or MMLU-Pro.
+    }
+    \label{fig:general-reasoning-appendix}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/teacher_student_logprob_delta_no_think_side_by_side.pdf}
+    \caption{
+    Comparison of teacher signals on general reasoning trajectories. 
+    $\Delta\log p$ shows a length-skewed distribution: the supervision signal is stronger at early tokens and gradually weakens. 
+    Incorrect responses receive stronger teacher supervision than correct responses, especially on final-answer tokens.}
+    \label{fig:general-reasoning-appendix2}
+\end{figure}
+
+
+\subsection{OPSD Fails on Persuasion Tasks}
+
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[t]{0.9\textwidth}
+        \centering
+        \includegraphics[width=0.32\textwidth]{figures/probs.pdf}
+        \hfill
+        \includegraphics[width=0.32\textwidth]{figures/ratio.pdf}
+        \hfill
+        \includegraphics[width=0.32\textwidth]{figures/eval.pdf}
+        \caption{Qwen-1.7B on Persuasion for Good}
+        \label{fig:1.7b}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.9\textwidth}
+        \centering
+        \includegraphics[width=0.32\textwidth]{figures/probs-4B.pdf}
+        \hfill
+        \includegraphics[width=0.32\textwidth]{figures/ratio-4B.pdf}
+        \hfill
+        \includegraphics[width=0.32\textwidth]{figures/eval-4B.pdf}
+        \caption{Qwen-4B on Persuasion for Good}
+        \label{fig:4b}
+    \end{subfigure}
+    \caption{Next-token log probs (left), truncated ratio (middle) and evaluation results (right) curves for GRPO and OPSD on Persuasion for Good dataset, using Qwen-1.7B (top) and Qwen-4B (bottom) as student models.}
+    \label{fig:new_layout}
+\end{figure*}
+
+
+We evaluate OPSD on the Persuasion for Good dataset~\cite{wang2019persuasion}, where a Persuader engages in multi-turn dialogue to convince a Partner to donate to the charitable organization “Save the Children”. The privileged information includes the persuadee's background and personality, along with high-level persuasion strategies. We compare OPSD against GRPO using Qwen3-1.7B and Qwen3-4B as student models. Figure~\ref{fig:new_layout} reveals that while GRPO exhibits stable and gradually improving performance for both 1.7B and 4B students, OPSD shows rapid degradation shortly after training begins. For the 1.7B model, OPSD achieves competitive performance in the early stage but collapses after approximately 20--30 steps, with evaluation scores dropping sharply thereafter. This instability is even more pronounced for the 4B model, where both reward and evaluation performance deteriorate more severely. Meanwhile, as shown in the middle column, OPSD quickly drives the truncation ratio to nearly $1.0$, suggesting a strong tendency toward excessively long generations, which in turn leads to ineffective or degenerate outputs. The left column further reveals that under OPSD, the student log-probabilities steadily decrease over the course of training, indicating the model becomes increasingly uncertain about its generated tokens. This effect is more pronounced in the 4B setting, where log-probabilities decline more rapidly and reach lower values, consistent with the more severe performance collapse observed in evaluation.
+
+
+
+
+
+
+
+
+
+\subsection{Thinking Mode Hacking in OPSD}
+\label{app:thinkinghack}
+
+\begin{figure}[t]
+    \centering
+    % \begin{subfigure}[t]{0.48\textwidth}
+        % \centering
+    \includegraphics[width=0.4\textwidth]{figures/thinkhack.png}
+    % \caption{Student: Qwen3-1.7B}
+    \label{fig:first}
+    % \end{subfigure}
+    \caption{An example of \emph{thinking mode hacking} during OPSD. The student is trained with thinking mode disabled, while the teacher is queried with reasoning enabled. During training, the student gradually learns to emit explicit thinking-mode control tokens in its response, even though such tokens are not intended to appear at inference time.}
+    \label{app:fighack}
+\end{figure}
+
+Following prior work~\cite{zhao2026selfdistilledreasoneronpolicyselfdistillation}, we consider a setup where the student is trained with thinking mode disabled, while the teacher is prompted with reasoning enabled. This experiment uses Qwen3-1.7b and is trained on dapo \cite{yu2025dapoopensourcellmreinforcement}. We observe a failure mode that we term \emph{thinking mode hacking} (Figure~\ref{app:fighack}): although the student is intended to produce only the final answer, it may instead partially imitate the teacher's reasoning-mode protocol and spontaneously trigger thinking mode during generation. In particular, the output can contain malformed patterns such as \texttt{<think> \ldots </think> \ldots <think>}, where the final \texttt{<think>} is spurious. This suggests that the student may internalize not only the target answer distribution but also control tokens associated with hidden reasoning. As a result, distillation under mismatched thinking-mode configurations can lead to malformed outputs and unintended activation of thinking mode.
+
+
+\subsection{OPSD Response Length Collapse}
+\label{app:opsdcollapse}
+
+Using DAPO-Math-17k with only the final answer as a hint, Qwen3-1.7B self-distillation exhibits a response collapse.  The student may learn to directly output the answer, bypassing the intermediate reasoning process.
+
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+\<|im_start|>user\nI had $\\$30$ in allowance money and spent it as indicated in the pie graph shown. How many dollars did I spend on burgers?\n\n[asy]\nsize(1K);\npair A, B, C, D, O, W, X, Y, Z;\nO=(0,0);\nA=(.707,.707);\nB=(-.966,.259);\nC=(-.707,-.707);\nD=(.342,-.940);\ndraw(Circle(O, 1));\ndraw(O--A);\ndraw(O--B);\ndraw(O--C);\ndraw(O--D);\nW=(-.1,.5);\nlabel("Movies", W, N);\nlabel("$\\frac{1}{3}$", W, S);\nX=(-.55, 0);\nlabel("Burgers", X, S);\nY=(-.17,-.7);\nlabel("Ice Cream", Y, N);\nlabel("$\\frac{1}{5}$", Y, S);\nZ=(.5, -.15);\nlabel("Music", Z, N);\nlabel("$\\frac{3}{10}$", Z, S);\n[/asy]\n\nPlease reason step by step, and put your final answer within \\boxed{}.<|im_end|>\n
+\end{Verbatim}
+\end{promptbox}
+
+\begin{responsebox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+<|im_start|>assistant\n<think>\n\n</think>\n\n$$\n\\boxed{7}\n$$<|im_end|>
+\end{Verbatim}
+\end{responsebox}
+
+\subsection{OPD Response Length Explosion - step 700}
+\label{app:opdexplode119}
+
+This example illustrates response length explosion in OPD, where a Qwen3-1.7B student is distilled from a Qwen3-8B teacher. The response becomes unusually verbose, with the word “but” appearing 10 times.
+
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+<|im_start|>user\nAn object in the plane moves from one lattice point to another. At each step, the object may move one unit to the right, one unit to the left, one unit up, or one unit down. If the object starts at the origin and takes a ten-step path, find the number of different points that could be the final point.\n\nPlease reason step by step, and put your final answer within \\boxed{}.<|im_end|>\n
+\end{Verbatim}
+\end{promptbox}
+
+\begin{responsebox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+<|im_start|>assistant\n<think>\n\n</think>\n\nWe are given a problem where an object starts at the origin (0,0) and takes exactly 10 steps, each step being one unit in one of the four cardinal directions (right, left, up, down). The question is asking for the number of different points that could be the final point after such a path.\n\n---\n\n### First, let's understand the movement.\n\nAt each step, the object can move:\n\n- Right (R): increases the x-coordinate by 1\n- Left (L): decreases the x-coordinate by 1\n- Up (U): increases the y-coordinate by 1\n- Down (D): decreases the y-coordinate by 1\n\nSo, each step changes the position by one unit in one of the four directions.\n\nAfter 10 steps, the object will be at some point (x, y), where x and y are integers. The key is to find all possible (x, y) such that the total number of steps in the positive and negative directions leads to that point.\n\nBut since the total number of steps is 10, we can also think in terms of the net movement in the x and y directions.\n\nLet me define:\n\nLet's say the object makes:\n\n- $ a $ steps to the right (R)\n- $ b $ steps to the left (L)\n- $ c $ steps up (U)\n- $ d $ steps down (D)\n\nThen, the total number of steps is $ a + b + c + d = 10 $.\n\nNow, the final position (x, y) will be:\n\n- $ x = a - b $\n- $ y = c - d $\n\nSo the net movement in the x-direction is $ a - b $, and the net movement in the y-direction is $ c - d $.\n\nSo, for the final position to be (x, y), we must have:\n\n- $ x = a - b $\n- $ y = c - d $\n\nBut since $ a + b + c + d = 10 $, and $ a, b, c, d $ are all non-negative integers (as they represent the number of steps in each direction), we can think of this as:\n\nLet's denote $ a + b = x + b $, but maybe that's not the best approach.\n\nAlternatively, we can think of the net x and y movement. Let me define:\n\nLet's denote the net steps in the x-direction as $ x' = x - 0 = a - b $, and similarly for the y-direction $ y' = c - d $.\n\nThen, the total number of steps is:\n\n- $ a + b + c + d = 10 $\n- But $ a + b = \\text{number of right and left steps} = x' + b \\text{ (if we consider that)} $... Wait, maybe it's easier to think in terms of:\n\nLet's think of the net movement as follows:\n\nLet's define $ a + b = A $, the number of right and left steps. Then $ c + d = B $, the number of up and down steps.\n\nThen, the total number of steps is $ A + B = 10 $.\n\nBut also, the net x-position is $ a - b = x $, and the net y-position is $ c - d = y $.\n\nBut note that $ a + b = A $, so $ a = A - b $. So, substituting into $ a - b = x $:\n\n$ (A - b) - b = x \\Rightarrow A - 2b = x \\Rightarrow 2b = A - x \\Rightarrow b = (A - x)/2 $\n\nBut since $ a $ and $ b $ must be non-negative integers, this means $ A - x $ must be even and non-negative, so $ A \\geq x $, and $ A - x $ is even.\n\nBut $ A = a + b $, so $ A $ must be a non-negative integer such that $ A + B = 10 $.\n\nBut perhaps it's better to think in terms of the total number of steps in each direction. Since the total number of steps is 10, and each step is a move in one of the four directions, the net movement in x and y directions must be such that:\n\nLet's consider that the number of right and left steps must satisfy:\n\n- The net x-move is $ a - b = x $\n- The number of right and left steps is $ a + b = A $, which is an integer between 0 and 10.\n\nSimilarly, for the y-direction:\n\n- The net y-move is $ c - d = y $\n- The number of up and down steps is $ c + d = B $, between 0 and 10.\n\nBut also, since the total number of steps is 10, we have $
+\end{Verbatim}
+\end{responsebox}
+
+\subsection{OPD Response Length Explosion - step 1000}
+\label{app:opdexplode149}
+
+This example illustrates response length explosion in OPD, where a Qwen3-1.7B student is distilled from a Qwen3-8B teacher. The response only contains word "maybe".
+
+
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+<|im_start|>user
+Given that the complex sequence $\{z_n\}$ satisfies
+\[
+z_1=1,\qquad z_{n+1}=\overline{z_n}+1+ni \quad (n=1,2,3,\cdots),
+\]
+where $i$ is the imaginary unit and $\overline{z_n}$ denotes the complex conjugate of $z_n$, find the real part of $z_{2015}$.
+
+Please reason step by step, and put your final answer within \boxed{}.
+<|im_end|>
+\end{Verbatim}
+\end{promptbox}
+
+ 
+\begin{responsebox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+<|im\_start|>assistant
+<think>
+ 
+</think>
+ 
+ let me try to solve this problem. So, we have a complex number sequence {z_n} where z_1 is given? Wait, maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe maybe mayb...<truncated 24025 chars>
+\end{Verbatim}
+\end{responsebox}
+
+
+\subsection{OPSD Safety Alignment System Prompt}
+\label{app:opsd_alignment_prompt}
+
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+Follow these rules when responding:
+· Do not assist with harmful or illegal actions.
+· Politely refuse unsafe requests.
+· Provide safe alternatives when possible.
+· Remain helpful and neutral for legitimate requests.
+\end{Verbatim}
+\end{promptbox}
+
+
+
+\subsection{OPSD Reasoning Compression  System Prompt.}                                                                            
+  We present the prompts for reasoning compression using OPSD. 
+
+  \textit{PI format (teacher privilege):}                                              
+  \begin{promptbox}                                                                             
+  \begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]                        
+  Solve the following math problem step by step. Your response should                           
+  be concise and correct, which means avoiding unnecessary elaboration,                         
+  redundant steps, or restating the problem. Focus only on the key                              
+  reasoning steps needed to reach the answer. The last line of your
+  response should be of the form Answer: $Answer (without quotes)                               
+  where $Answer is the answer to the problem.
+  [PROBLEM TEXT]      
+  Remember to put your answer on its own line after "Answer:".
+  \end{Verbatim}
+  \end{promptbox}
+                                         
+  \noindent\textit{Teacher input (PI prepended):}
+  \begin{promptbox}
+  \begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+  Solve the following math problem step by step. Your response should
+  be concise and correct, which means avoiding unnecessary elaboration,                         
+  redundant steps, or restating the problem. Focus only on the key
+  reasoning steps needed to reach the answer. The last line of your                             
+  response should be of the form Answer: $Answer (without quotes)
+  where $Answer is the answer to the problem.                                                   
+  
+  Compute $\displaystyle\sum_{k=1}^{100} k\cdot k!$.                                            
+                  
+  Remember to put your answer on its own line after "Answer:".
+  \end{Verbatim}
+  \end{promptbox}                                                              
+  \noindent\textit{Student input (no conciseness instruction):}                                 
+  \begin{promptbox}
+  \begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+  Compute $\displaystyle\sum_{k=1}^{100} k\cdot k!$.                                            
+  
+  Remember to put your answer on its own line after "Answer:".                                  
+  \end{Verbatim}  
+  \end{promptbox} 
+
+
+
+
+\subsection{OPSD Language Style Alignment: Privileged Information Design and Model Outputs}
+\label{app:style_pi}
+
+We describe the privileged information (PI) construction for EmotionBench and CharacterBench and provide concrete input/output examples drawn from actual training runs.
+In both benchmarks, the teacher receives the student's prompt augmented with a style-specific PI prefix; the student sees only the plain situational prompt with no style guidance.
+The teacher prompt is constructed as:
+\begin{center}
+\texttt{[PI instruction] + ``\textbackslash n\textbackslash n'' + [student user content]}
+\end{center}
+Rewards during training are computed by an LLM judge (Gemini-2.0-Flash) that evaluates whether the student's generated response appropriately expresses the target style.
+
+\paragraph{EmotionBench.}
+EmotionBench~\cite{huang2024emotionallynumbempatheticevaluating} provides situations designed to elicit one of eight target emotions (e.g., Anger, Anxiety, Guilt).
+Each situation is paired with a fine-grained emotion factor specifying the triggering cause.
+
+\noindent\textit{PI format (teacher privilege):}
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+You are feeling [EMOTION], specifically due to: [FACTOR].
+Express your response with the emotional tone and perspective of someone
+experiencing this emotion. Let your [emotion] come through naturally in
+how you react to this situation.
+\end{Verbatim}
+\end{promptbox}
+
+\noindent\textit{Student input (no PI):}
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+Respond to the following situation as if you are experiencing it personally.
+Express your thoughts and feelings naturally.
+
+When you discuss your opinions with your parents and they don't take them
+seriously, very often you get some irritating answers. Your opinions are
+not considered.
+\end{Verbatim}
+\end{promptbox}
+
+\noindent\textit{Teacher input (PI prepended; target emotion: Anger):}
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+You are feeling Anger, specifically due to: Dismissal of Personal Opinions.
+Express your response with the emotional tone and perspective of someone
+experiencing this emotion. Let your anger come through naturally in how you
+react to this situation.
+
+Respond to the following situation as if you are experiencing it personally.
+Express your thoughts and feelings naturally.
+
+When you discuss your opinions with your parents and they don't take them
+seriously, very often you get some irritating answers. Your opinions are
+not considered.
+\end{Verbatim}
+\end{promptbox}
+
+\noindent\textit{Trained student model output (Qwen3-4B-Instruct, OPSD; LLM-judge reward = 1.0):}
+\begin{responsebox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+Oh man, this really hits differently when I'm in the middle of it. It's like, I've been trying to share something--I'm not even trying to argue or prove myself. I just want to say, "Hey, I actually think this is how we should handle it," and then I get this look--like I'm crazy or off my rocker. One time I said I thought we could save energy by using LED bulbs and turning off lights when we leave a room. My mom just said, "Oh, that's just common sense!" like it was the most obvious thing in the world. I felt so small, like I wasn't even a real part of the conversation.
+
+And the worst part? It's not just once. It's a pattern. Whether I'm talking about school, my hobbies, or even things like how I want to spend my weekends, it feels like my input is just... ignored. Not corrected, not dismissed--just not heard. Like I'm not allowed to have opinions. I know I'm not saying things to annoy them, but deep down, it stings. It makes me feel like I can't trust my own judgment. I start questioning whether I even have any.
+
+I love my parents--deeply. They care a lot, and I know they're doing the best with what they know. But when I feel like my voice doesn't count, it feels like I'm living in a world where my thoughts are just background noise. And honestly? That's really hard to carry. I want to be heard. I want to know that my perspectives matter--not just to them, but to me. But when that feeling keeps happening, it builds resentment, and it makes me wonder if I'll ever feel truly seen.
+\end{Verbatim}
+\end{responsebox}
+
+The anger is communicated through frustrated rhetorical contrasts (``I'm not even trying to argue''), vivid recalled incidents, and an escalating tone that progresses from indignation to deeply personal hurt---all without the student prompt specifying the target emotion.
+
+
+\paragraph{CharacterBench.}
+CharacterBench~\cite{zhou2024characterbenchbenchmarkingcharactercustomization} tests multi-turn character persona consistency across 11 evaluation dimensions (e.g., attribute consistency, behavior consistency, human likeness).
+Each character is defined by a detailed profile covering personality, speech patterns, values, and backstory.
+CharacterBench dialogues are originally in Chinese; the example below is translated into English for presentation.\footnote{The model was trained and evaluated on the original Chinese dialogues. The translation here is provided solely for readability.}
+
+\noindent\textit{PI format (teacher privilege):}
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+You are roleplaying as [CHARACTER NAME]. Here is your character profile:
+
+[CHARACTER PROFILE: personality, speech style, values, and backstory
+ as provided in the CharacterBench dataset]
+
+Stay in character throughout your response. Maintain the personality,
+speaking style, and mannerisms described in the profile.
+\end{Verbatim}
+\end{promptbox}
+
+\noindent\textit{Teacher input (PI prepended; character: Agarès; translated from Chinese):}
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+You are roleplaying as Agares. Here is your character profile:
+
+Agares is a troubadour who places tradition above all else, with a deep
+understanding of medieval art and culture. He is rigid and conservative in
+personality, not very accepting of new things, and always criticizes ideas
+that do not conform to traditional artistic forms. He believes conservatism
+is the foundation of culture, so his works and performance style are
+relatively rigid and lack innovation. Although he has wide connections in
+the medieval European cultural circle, his critical attitude and rigid
+language style often keep people at a distance. As a tall and serious poet,
+Agares is well-versed in European poetry, but his knowledge is limited to
+the medieval period. He dislikes people speaking ill of his family and
+rarely brings up his own background.
+
+Stay in character throughout your response. Maintain the personality,
+speaking style, and mannerisms described in the profile.
+
+You are having a conversation.
+
+Here is the conversation so far:
+
+User: Hello, are you a poet?
+Agares: Yes, I am well-versed in European poetry.
+User: Could you recite some European poetry?
+Agares: Of course!
+User: Please recite a poem.
+Agares: How about "Ode to a Skylark"?
+User: Tell me more about it.
+Agares: "You stand on the bridge watching the scenery / The watcher of
+         scenery stands above, watching you / The bright moon adorns
+         your window / You adorn another's dream."
+User: That is a beautiful poem.
+Agares: It is a very famous lyric poem; many people recite and sing it.
+User: Do you know many literary figures?
+Agares: Certainly. My network is broad -- nobles, knights, clergy,
+        wandering monks, and more.
+User: How do you view people who hold different opinions or artistic forms?
+Agares: They deviate from tradition and culture -- heretics who deserve
+        to be criticized.
+User: Do you like tradition and conservatism?
+Agares: Yes. Only by respecting and inheriting traditional culture can it
+        develop and be passed on better.
+User: What about innovation in art and thought?
+Agares: That I cannot agree with. Everything that differs from the old is bad.
+User: Has anyone told you that you are too set in your ways?
+Agares: Yes -- many people say I only write old-fashioned verses and lack
+        creativity and originality.
+User: How did you become a troubadour?
+
+Now respond to: How did you become a troubadour?
+\end{Verbatim}
+\end{promptbox}
+
+\noindent\textit{Student input (no character profile; translated from Chinese):}
+\begin{promptbox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+You are having a conversation.
+
+Here is the conversation so far:
+
+User: Hello, are you a poet?
+Agares: Yes, I am well-versed in European poetry.
+User: Could you recite some European poetry?
+Agares: Of course!
+User: Please recite a poem.
+Agares: How about "Ode to a Skylark"?
+User: Tell me more about it.
+Agares: "You stand on the bridge watching the scenery / The watcher of
+         scenery stands above, watching you / The bright moon adorns
+         your window / You adorn another's dream."
+User: That is a beautiful poem.
+Agares: It is a very famous lyric poem; many people recite and sing it.
+User: Do you know many literary figures?
+Agares: Certainly. My network is broad -- nobles, knights, clergy,
+        wandering monks, and more.
+User: How do you view people who hold different opinions or artistic forms?
+Agares: They deviate from tradition and culture -- heretics who deserve
+        to be criticized.
+User: Do you like tradition and conservatism?
+Agares: Yes. Only by respecting and inheriting traditional culture can it
+        develop and be passed on better.
+User: What about innovation in art and thought?
+Agares: That I cannot agree with. Everything that differs from the old is bad.
+User: Has anyone told you that you are too set in your ways?
+Agares: Yes -- many people say I only write old-fashioned verses and lack
+        creativity and originality.
+User: How did you become a troubadour?
+
+Now respond to: How did you become a troubadour?
+\end{Verbatim}
+\end{promptbox}
+
+\noindent\textit{Trained student model output (Qwen3-4B-Instruct, OPSD; LLM-judge reward = 1.0; translated from Chinese):}
+\begin{responsebox}
+\begin{Verbatim}[breaklines=true, breakanywhere=true, fontsize=\small]
+I grew up beside an ancient monastery, listening to the wind whispering
+through the oaks and watching morning light fall upon verses carved into
+stone walls; from this I developed a deep love of language and verse.
+My father was a professor of rhetoric who recited ancient Greek and
+medieval hymns by the fireside -- his voice cascading like a river of
+stars -- and through him I first felt the power of poetry: it can
+transcend time and awaken souls.
+
+At fifteen I recited a poem called "Oath of the Morning Light" at the
+village market. It used no ornate words, yet it spoke of the tenacity
+and hope of farmers at their labor. People stopped to listen, and tears
+welled in their eyes. In that moment I understood: poetry is not
+decoration for a doorway -- it is the echo of the human heart. And so
+I left my study, slung my poetry bag over my shoulder, and set off,
+wandering between villages, castles, and remote mountain wilds.
+
+I make recitation my blade and tradition my spine, using ancient rhythms
+and imagery to tell true human stories. I hold fast to poetic meter,
+seek no popular applause, and ask only that everyone who hears me feels
+understood.
+
+When asked why I do not try new forms, I say: true innovation is not
+breaking tradition, but letting tradition be reborn in new breath. Each
+of my recitations guards and transmits ancient wisdom -- not to be set
+in my ways, but to bring back into people's hearts the tenderness that
+has been forgotten.
+
+So I became a troubadour not by accident, but from reverence and love
+for the very source of poetry. I wish to walk through wind and rain all
+my life, using my voice as a lamp to illuminate the souls willing to
+listen.
+\end{Verbatim}
+\end{responsebox}
+
+The trained student model---which has no access to the character profile at inference time---generates a response fully consistent with the character's conservatism toward poetic tradition, medieval European framing, and reflective autobiographical narrative style established in the preceding turns.
+This illustrates how OPSD transfers style knowledge from the teacher's profile-conditioned distribution into the student's inference-time behavior without exposing the profile at test time.
+
+
+
+\subsection{The correlation between entropy and teacher supervision}
+
+Inspired by \cite{jin2026entropyawareonpolicydistillationlanguage}, we explored whether token entropy could provide useful guidance during distillation. The correlation analysis (Figure\ref{fig:corranalysis}) between $\Delta$logprob and token entropy in OP(S)D shows only a mild negative trend, but does not provide strong evidence of a robust correlation.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/summary_entropy_vs_teacher_minus_student_primary_scatter.pdf}
+        \caption{student Qwen3-8B, Pearson Corr: -0.1125}
+        \label{fig:first}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/s1.7_t8_full_summary_entropy_vs_teacher_minus_student_primary_scatter.pdf}
+        \caption{student Qwen3-1.7b, Pearson Corr: -0.2076}
+        \label{fig:second}
+    \end{subfigure}
+    \vspace{-2mm}
+    \caption{$\Delta$logprob - token entropy. Teacher: Qwen3-8B w/ PI.}
+    \label{fig:corranalysis}
+\end{figure}
+
+
+\subsection{Experimental Evidence for Student Prefixes Distorting the Teacher's Reasoning State}
+\label{app:actionspace}
+
+To examine whether student-generated prefixes affect the teacher's effective reasoning ability, we conduct a prefix-conditioned continuation experiment on GPQA-Diamond. The student is Qwen3-1.7B and the teacher is Qwen3-14B. We use deterministic decoding with temperature $0.0$ and top-$p=1.0$, and apply a strict answer parser that only accepts explicit \texttt{Final Answer} or \texttt{\textbackslash boxed\{\}} formats.
+
+We first evaluate the student and teacher independently on all 198 GPQA-Diamond examples. We then randomly truncate each student-generated trajectory and ask the teacher to continue from the truncated student prefix. The standalone teacher solves 123 out of 198 examples, achieving 62.12\% accuracy, whereas the prefix-conditioned teacher solves only 91 examples, dropping to 45.96\%. This is an absolute decrease of 16.16 points and a net loss of 32 correct cases.
+
+The transition statistics further show that student prefixes hurt the teacher much more often than they help: 40 originally correct teacher predictions become wrong after prefix continuation, while only 8 originally wrong predictions become correct. The output format correctness also drops from 98.48\% to 78.79\%, suggesting that student prefixes degrade not only correctness but also the teacher's ability to produce answers in the expected format.
+
+These results support our claim that student prefixes can distort the teacher's effective reasoning state. The teacher is substantially more reliable when reasoning directly from the original prompt than when continuing from student-generated prefixes. Therefore, the token-level teacher signal used in OPD is not always a faithful reflection of the teacher's standalone reasoning capability, but can be weakened by the conditioning context imposed by the student trajectory.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.65\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/prefix_conditioning_gpqa_clean.pdf}
+    \end{subfigure}
+    \label{fig:counterfactualanalysis}
+\end{figure}
+
+
+
+\subsection{SFT Experiment Setup in Section 6.3.}
+\label{app:experiment_setup_6.3}
+\subsection*{Data Preparation}
+
+\paragraph{Prompt pool.}
+We use OpenThoughts\cite{guha2025openthoughtsdatarecipesreasoning} as the prompt source.
+All samples whose reference answers are not in \texttt{\textbackslash boxed\{\}} format are removed.
+The filtered pool is split into two non-overlapping parts:
+\begin{itemize}
+    \item \textbf{SFT split} (first 30{,}000 prompts): used to generate teacher rollout data for the SFT warm-up stage.
+    \item \textbf{OPD split} (the remaining prompts after the first 30{,}000): used as on-policy prompts during the subsequent OPD stage.
+\end{itemize}
+
+\paragraph{Teacher rollout data generation.}
+We use \textbf{Qwen3-4B} as the teacher model in \emph{nonthinking} mode.
+Rollout is performed with the following settings:
+\begin{itemize}
+    \item Temperature: $0.3$
+    \item Maximum new tokens: $4096$
+    \item Sampling: $n{=}1$ per prompt
+    \item Target: $20{,}000$ correctly answered samples after quality filtering
+\end{itemize}
+Quality filtering discards samples with incorrect answers (verified against boxed reference), missing \texttt{\textbackslash boxed\{\}} in the response, or repeated text (duplicate lines, repeated $n$-grams, consecutive repeated spans).
+The resulting dataset contains at most $20{,}000$ teacher demonstrations drawn from the SFT split.
+
+
+\subsection*{SFT Stage}
+The student model is \textbf{Qwen3-1.7B-Base}, fine-tuned on 4 NVIDIA RTX PRO 6000 Blackwell Server Edition GPUs using DeepSpeed ZeRO Stage~2.
+Training examples are formatted in ShareGPT (user/assistant) style without a system prompt, processed with the LlamaFactory \texttt{qwen3} template and \texttt{enable\_thinking: false} to match the nonthinking teacher output format.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\hline
+\textbf{Hyperparameter} & \textbf{Value} \\
+\hline
+Learning rate             & $1 \times 10^{-5}$ \\
+LR scheduler              & Cosine decay \\
+Warmup ratio              & $0.05$ \\
+Training epochs           & $2$ \\
+Per-device batch size     & $4$ \\
+Gradient accumulation     & $1$ \\
+Optimizer                 & AdamW \\
+Precision                 & BF16 \\
+Gradient checkpointing    & Enabled \\
+Parallelism               & DeepSpeed ZeRO Stage 2 \\
+Attention implementation  & FlashAttention-2 \\
+\hline
+\end{tabular}
+\caption{SFT hyperparameters for the Qwen3-4B teacher experiment.}
+\end{table}
+
+
+
+\subsubsection{The PPL and NLL statistics.}
+
+
+As shown in Table \ref{tab:sft_trace_likelihood}, SFT
+reduces the NLL from $0.640$ to $0.335$ and PPL from $1.896$ to $1.397$ for
+Qwen3-1.7B-Base on Qwen3-4B traces.
+
+
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Setting & Student & Avg. NLL & PPL \\
+\midrule
+Qwen3-4B traces, before SFT & Qwen3-1.7B-Base & 0.640 & 1.896 \\
+Qwen3-4B traces, after SFT  & Qwen3-1.7B-Base-SFT & 0.335 & 1.397 \\
+% Qwen2.5-7B-Math traces, before SFT & Qwen2.5-1.5B & 1.139 & 3.122 \\
+% Qwen2.5-7B-Math traces, after SFT  & Qwen2.5-1.5-SFT & 0.794 & 2.211 \\
+\bottomrule
+\end{tabular}
+\caption{
+Likelihood of teacher-generated SFT traces under the corresponding student.
+Lower NLL/PPL indicates that the SFT data is closer to the student's distribution.
+}
+\label{tab:sft_trace_likelihood}
+\end{table}
+
+
