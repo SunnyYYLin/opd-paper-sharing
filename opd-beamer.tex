@@ -4,6 +4,25 @@
 \usepackage{wrapfig}
 \usepackage{booktabs}
 
+% TOC 样式自定义
+\setbeamerfont{section in toc}{size=\large,series=\bfseries}
+\setbeamerfont{section in toc shaded}{size=\large,series=\bfseries}
+\setbeamerfont{subsection in toc}{size=\normalsize}
+\setbeamertemplate{section in toc}{%
+  \leavevmode
+  \raisebox{0.15ex}{\color{zgcayellow}\rule[-0.15ex]{2.5pt}{0.9em}}\hspace{0.6em}%
+  \textcolor{zgcayellow}{\inserttocsection}\par\vspace{0.35em}
+}
+\setbeamertemplate{section in toc shaded}{%
+  \leavevmode
+  \raisebox{0.15ex}{\color{structure.fg}\rule[-0.15ex]{2.5pt}{0.9em}}\hspace{0.6em}%
+  \inserttocsection\par\vspace{0.35em}
+}
+\setbeamertemplate{subsection in toc}{%
+  \hspace{1.8em}\inserttocsubsection\par\vspace{0.15em}
+}
+\setbeamercolor{section in toc shaded}{fg=maincolor}
+
 % Set the background image for the title slide
 \titlebackground{assets/background}
 
